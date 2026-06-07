@@ -1,18 +1,6 @@
 import * as ts from "typescript";
 import type { AnalysisResult } from "../analyzer";
-import {
-  resolveType,
-  resolveTypeFromNode,
-  needsAllocator,
-} from "../analyzer/type-resolver";
-import type {
-  Diagnostic,
-  IRModule,
-  IRNode,
-  IRFunction,
-  IRImport,
-  IRType,
-} from "../types";
+import type { Diagnostic, IRModule, IRNode, IRImport } from "../types";
 import { transformFunction } from "./passes/functions";
 import { transformClass } from "./passes/classes";
 import { transformInterface, transformTypeAlias } from "./passes/types";
@@ -35,56 +23,72 @@ export function transformToIR(
   };
 
   const body: IRNode[] = [];
+  const scriptBody: IRNode[] = [];
   const imports: IRImport[] = [];
 
-  // Imports
   for (const imp of analysis.imports) {
     const result = transformImport(imp, ctx);
     if (result) imports.push(result);
   }
 
-  // Enums
   for (const en of analysis.enums) {
     const result = transformEnum(en, ctx);
     if (result) body.push(result);
   }
 
-  // Interfaces
   for (const iface of analysis.interfaces) {
     const result = transformInterface(iface, ctx);
     if (result) body.push(result);
   }
 
-  // Type aliases
   for (const alias of analysis.typeAliases) {
     const result = transformTypeAlias(alias, ctx);
     if (result) body.push(result);
   }
 
-  // Classes
   for (const cls of analysis.classes) {
     const result = transformClass(cls, ctx);
     if (result) body.push(result);
   }
 
-  // Variables
-  for (const varStmt of analysis.variables) {
-    for (const decl of varStmt.declarationList.declarations) {
-      const result = transformVariable(decl, varStmt, ctx);
-      if (result) body.push(result);
-    }
-  }
-
-  // Functions
   for (const fn of analysis.functions) {
     const result = transformFunction(fn, ctx);
     if (result) body.push(result);
   }
 
-  // Top-level statements
-  for (const stmt of analysis.topLevelStatements) {
-    const result = transformStatement(stmt, ctx);
-    if (result) body.push(result);
+  switch (analysis.moduleKind) {
+    case "library": {
+      for (const varStmt of analysis.variables) {
+        for (const decl of varStmt.declarationList.declarations) {
+          const result = transformVariable(decl, varStmt, ctx);
+          if (result) body.push(result);
+        }
+      }
+      for (const stmt of analysis.topLevelStatements) {
+        const result = transformStatement(stmt, ctx);
+        if (result) body.push(result);
+      }
+      break;
+    }
+
+    case "executable": {
+      for (const varStmt of analysis.variables) {
+        for (const decl of varStmt.declarationList.declarations) {
+          const result = transformVariable(decl, varStmt, ctx);
+          if (result) body.push(result);
+        }
+      }
+      for (const stmt of analysis.topLevelStatements) {
+        const result = transformStatement(stmt, ctx);
+        if (result) scriptBody.push(result);
+      }
+      break;
+    }
+
+    case "script": {
+      collectOrderedScriptNodes(analysis, ctx, body, scriptBody);
+      break;
+    }
   }
 
   return {
@@ -94,7 +98,40 @@ export function transformToIR(
     body,
     errors: Array.from(ctx.errors),
     hasMain: analysis.hasMainFunction,
+    moduleKind: analysis.moduleKind,
+    scriptBody,
   };
+}
+
+function collectOrderedScriptNodes(
+  analysis: AnalysisResult,
+  ctx: TransformContext,
+  body: IRNode[],
+  scriptBody: IRNode[],
+): void {
+  ts.forEachChild(analysis.sourceFile, (node) => {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isInterfaceDeclaration(node) ||
+      ts.isTypeAliasDeclaration(node) ||
+      ts.isEnumDeclaration(node) ||
+      ts.isImportDeclaration(node)
+    ) {
+      return;
+    }
+
+    if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
+        const result = transformVariable(decl, node, ctx);
+        if (result) scriptBody.push(result);
+      }
+      return;
+    }
+
+    const result = transformStatement(node, ctx);
+    if (result) scriptBody.push(result);
+  });
 }
 
 export interface TransformContext {

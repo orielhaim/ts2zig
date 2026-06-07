@@ -2,17 +2,14 @@ import * as ts from "typescript";
 import type { IRType } from "../types";
 
 export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
-  // Null / Undefined
   if (type.flags & ts.TypeFlags.Null || type.flags & ts.TypeFlags.Undefined) {
     return { kind: "optional", inner: { kind: "primitive", name: "void" } };
   }
 
-  // Void
   if (type.flags & ts.TypeFlags.Void) {
     return { kind: "primitive", name: "void" };
   }
 
-  // Boolean
   if (
     type.flags & ts.TypeFlags.Boolean ||
     type.flags & ts.TypeFlags.BooleanLiteral
@@ -20,7 +17,6 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
     return { kind: "primitive", name: "bool" };
   }
 
-  // Number
   if (
     type.flags & ts.TypeFlags.Number ||
     type.flags & ts.TypeFlags.NumberLiteral
@@ -28,7 +24,6 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
     return { kind: "primitive", name: "f64" };
   }
 
-  // String
   if (
     type.flags & ts.TypeFlags.String ||
     type.flags & ts.TypeFlags.StringLiteral
@@ -36,7 +31,6 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
     return { kind: "string" };
   }
 
-  // Union types (including T | null → ?T)
   if (type.isUnion()) {
     const types = type.types;
 
@@ -54,7 +48,6 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
       return { kind: "optional", inner };
     }
 
-    // Boolean union (true | false) → bool
     if (
       types.length === 2 &&
       types.every((t) => !!(t.flags & ts.TypeFlags.BooleanLiteral))
@@ -62,11 +55,9 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
       return { kind: "primitive", name: "bool" };
     }
 
-    // Complex union — not fully supported yet
     return { kind: "unknown" };
   }
 
-  // Array
   if (checker.isArrayType(type)) {
     const typeArgs = (type as ts.TypeReference).typeArguments;
     if (typeArgs && typeArgs.length > 0) {
@@ -76,25 +67,20 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
     return { kind: "array", elementType: { kind: "unknown" } };
   }
 
-  // Object / Interface / Class
   if (type.flags & ts.TypeFlags.Object) {
-    const objectType = type as ts.ObjectType;
     const symbol = type.getSymbol();
 
     if (symbol) {
       const name = symbol.getName();
 
-      // Skip anonymous types / __type
       if (name && name !== "__type" && name !== "__object") {
         return { kind: "struct", name };
       }
     }
 
-    // Anonymous object type — treat as struct
     return { kind: "struct", name: "AnonymousStruct" };
   }
 
-  // Any / Unknown
   if (type.flags & ts.TypeFlags.Any) {
     return { kind: "anyopaque" };
   }
@@ -103,12 +89,10 @@ export function resolveType(type: ts.Type, checker: ts.TypeChecker): IRType {
     return { kind: "unknown" };
   }
 
-  // Never
   if (type.flags & ts.TypeFlags.Never) {
     return { kind: "primitive", name: "void" };
   }
 
-  // Enum
   if (type.flags & ts.TypeFlags.Enum || type.flags & ts.TypeFlags.EnumLiteral) {
     const symbol = type.getSymbol();
     return { kind: "enum", name: symbol?.getName() ?? "UnknownEnum" };
@@ -201,7 +185,7 @@ export function needsAllocator(type: IRType): boolean {
     case "errorUnion":
       return needsAllocator(type.okType);
     case "struct":
-      return true; // conservative — structs may allocate
+      return true;
     default:
       return false;
   }

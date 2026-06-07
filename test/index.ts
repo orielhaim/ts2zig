@@ -1,24 +1,35 @@
-// example/math.ts
-export function add(a: number, b: number): number {
-  return a + b;
-}
+import { Calculator, greet, type User } from "./math";
 
-export function main(): void {
-  const result = add(10, 20);
-  console.log(result);
+function main(): void {
+  const calc = new Calculator();
 
-  const name: string = "world";
-  console.log(`hello ${name}`);
+  const a = calc.add(10, 20);
+  const b = calc.multiply(a, 2);
 
-  const items: number[] = [1, 2, 3];
-  for (const item of items) {
-    console.log(item);
+  console.log(`a = ${a}`);
+  console.log(`b = ${b}`);
+
+  const numbers: number[] = [10, 20, 30, 40];
+  const avg = Calculator.average(numbers);
+
+  console.log(`average = ${avg}`);
+
+  const user: User = {
+    id: 1,
+    name: "Oriel",
+  };
+
+  console.log(greet(user));
+  console.log(greet(user, "Welcome"));
+
+  for (const entry of calc.getHistory()) {
+    console.log(`history: ${entry}`);
   }
 
-  if (result > 15) {
-    console.log("big number");
+  if (avg > 20) {
+    console.log("average is high");
   } else {
-    console.log("small number");
+    console.log("average is low");
   }
 }
 

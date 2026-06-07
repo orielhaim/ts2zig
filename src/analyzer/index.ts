@@ -1,6 +1,8 @@
 import * as ts from "typescript";
 import type { Diagnostic } from "../types";
 
+export type ModuleKind = "library" | "executable" | "script";
+
 export interface AnalysisResult {
   sourceFile: ts.SourceFile;
   checker: ts.TypeChecker;
@@ -14,6 +16,7 @@ export interface AnalysisResult {
   exports: Set<string>;
   hasMainFunction: boolean;
   topLevelStatements: ts.Statement[];
+  moduleKind: ModuleKind;
 }
 
 export function analyzeSourceFile(
@@ -34,13 +37,30 @@ export function analyzeSourceFile(
     exports: new Set(),
     hasMainFunction: false,
     topLevelStatements: [],
+    moduleKind: "library",
   };
 
   ts.forEachChild(sourceFile, (node) => {
     visitTopLevel(node, result, diagnostics);
   });
 
+  result.moduleKind = determineModuleKind(result);
+
   return result;
+}
+
+function determineModuleKind(result: AnalysisResult): ModuleKind {
+  const hasTopLevel = result.topLevelStatements.length > 0;
+
+  if (result.hasMainFunction) {
+    return "executable";
+  }
+
+  if (hasTopLevel) {
+    return "script";
+  }
+
+  return "library";
 }
 
 function visitTopLevel(
@@ -80,9 +100,25 @@ function visitTopLevel(
     }
   } else if (ts.isImportDeclaration(node)) {
     result.imports.push(node);
-  } else if (ts.isExpressionStatement(node)) {
-    result.topLevelStatements.push(node);
+  } else if (isImperativeStatement(node)) {
+    result.topLevelStatements.push(node as ts.Statement);
   }
+}
+
+function isImperativeStatement(node: ts.Node): boolean {
+  return (
+    ts.isExpressionStatement(node) ||
+    ts.isIfStatement(node) ||
+    ts.isForStatement(node) ||
+    ts.isForOfStatement(node) ||
+    ts.isForInStatement(node) ||
+    ts.isWhileStatement(node) ||
+    ts.isDoStatement(node) ||
+    ts.isSwitchStatement(node) ||
+    ts.isTryStatement(node) ||
+    ts.isThrowStatement(node) ||
+    ts.isReturnStatement(node)
+  );
 }
 
 function hasExportModifier(node: ts.Node): boolean {

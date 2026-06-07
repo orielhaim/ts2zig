@@ -90,14 +90,12 @@ export function compile(
   const program = ts.createProgram(tsFiles, compilerOptions);
   const checker = program.getTypeChecker();
 
-  // Collect TS diagnostics but only real errors, skip lib issues
   const tsDiagnostics = ts.getPreEmitDiagnostics(program);
   for (const d of tsDiagnostics) {
     if (d.file && d.start !== undefined) {
       const normalizedFileName = normalizePath(d.file.fileName);
       const normalizedInputDir = normalizePath(resolvedInputDir);
 
-      // Only report diagnostics for our source files
       if (!normalizedFileName.startsWith(normalizedInputDir)) continue;
 
       const { line, character } = d.file.getLineAndCharacterOfPosition(d.start);
@@ -117,7 +115,6 @@ export function compile(
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile) continue;
 
-    // Normalize both paths for comparison (Windows compat)
     const normalizedSourcePath = normalizePath(resolve(sourceFile.fileName));
     const normalizedInputPath = normalizePath(resolvedInputDir);
 
@@ -145,7 +142,6 @@ export function compile(
     }
   }
 
-  // Always add runtime
   files.push({
     path: "_runtime.zig",
     content: generateRuntime(),

@@ -50,14 +50,15 @@ export type IRNode =
   | IROptionalChain
   | IRNullishCoalesce
   | IRTypeAlias;
-
 export interface IRModule {
   kind: "module";
   fileName: string;
   imports: IRImport[];
-  body: IRNode[];
+  body: IRNode[]; // declarations: structs, enums, functions, module-level consts
   errors: string[];
   hasMain: boolean;
+  moduleKind: "library" | "executable" | "script";
+  scriptBody: IRNode[]; // imperative statements → go inside generated main()
 }
 
 export interface IRImport {

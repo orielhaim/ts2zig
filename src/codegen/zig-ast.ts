@@ -85,17 +85,14 @@ function generateFunction(
 
   const params: string[] = [];
 
-  // Self parameter for methods
   if (node.isMethod && !node.isStatic) {
     params.push("self: *Self");
   }
 
-  // Allocator parameter
   if (node.needsAllocator) {
     params.push("allocator: std.mem.Allocator");
   }
 
-  // Regular parameters
   for (const p of node.params) {
     params.push(`${sanitizeName(p.name)}: ${typeToZig(p.type)}`);
   }
@@ -125,11 +122,9 @@ function generateStruct(
   w.writeLine(`${pub}const ${node.name} = struct {`);
   w.indent();
 
-  // Self alias
   w.writeLine("const Self = @This();");
   w.writeLine("");
 
-  // Fields
   for (const field of node.fields) {
     const fieldType = typeToZig(field.type);
     if (field.defaultValue) {
@@ -147,7 +142,6 @@ function generateStruct(
     w.writeLine("");
   }
 
-  // Init method from constructor
   if (node.hasInit) {
     const initMethod = node.methods.find((m) => m.name === "init");
     if (initMethod) {
@@ -155,7 +149,6 @@ function generateStruct(
     }
   }
 
-  // Other methods
   for (const method of node.methods) {
     if (method.name === "init") continue;
     w.writeLine("");
@@ -183,7 +176,6 @@ function generateInitMethod(
   w.writeLine("return Self{");
   w.indent();
 
-  // Map constructor params to fields (by matching names)
   for (const field of struct.fields) {
     const matchingParam = initMethod.params.find((p) => p.name === field.name);
     if (matchingParam) {
@@ -218,7 +210,6 @@ function generateVariable(
   if (node.value) {
     const valueStr = generateExpr(node.value, diagnostics);
 
-    // Array literal needs special handling
     if (node.value.kind === "arrayLiteral") {
       generateArrayInit(node, w, diagnostics);
       return;
@@ -239,7 +230,6 @@ function generateVariable(
     }
   }
 
-  // Add defer for allocated resources
   if (node.needsDefer && node.value?.kind === "arrayLiteral") {
     w.writeLine(`defer ${sanitizeName(node.name)}.deinit(allocator);`);
   }
@@ -254,7 +244,7 @@ function generateArrayInit(
   const elementType = typeToZig(arrNode.elementType);
 
   w.writeLine(
-    `var ${sanitizeName(node.name)}: std.ArrayList(${elementType}) = .empty;`,
+    `var ${sanitizeName(node.name)}: std.ArrayListUnmanaged(${elementType}) = .empty;`,
   );
   w.writeLine(`defer ${sanitizeName(node.name)}.deinit(allocator);`);
 
@@ -431,8 +421,6 @@ function generateTryCatch(
   diagnostics: Diagnostic[],
   depth: number,
 ): void {
-  // Zig doesn't have try/catch blocks like TS
-  // We emit the try body with catch on error-returning calls
   w.writeLine("// try block");
   w.writeLine("{");
   w.indent();
@@ -492,10 +480,6 @@ function generateEnum(
   w.writeLine("};");
 }
 
-// ===========================================
-// Expression Generator (returns string)
-// ===========================================
-
 export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
   switch (node.kind) {
     case "literal":
@@ -508,7 +492,6 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
       const left = generateExpr(node.left, diagnostics);
       const right = generateExpr(node.right, diagnostics);
 
-      // String concatenation — not directly supported in Zig
       if (
         node.operator === "+" &&
         (isStringNode(node.left) || isStringNode(node.right))
@@ -545,7 +528,6 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
       return `${generateExpr(node.object, diagnostics)}[${generateExpr(node.index, diagnostics)}]`;
 
     case "arrayLiteral":
-      // This should be handled at statement level, but for inline use:
       return `// inline array literal`;
 
     case "objectLiteral": {
@@ -600,10 +582,6 @@ function generateLiteral(node: any): string {
   return "undefined";
 }
 
-// ===========================================
-// Type to Zig string
-// ===========================================
-
 export function typeToZig(type: IRType): string {
   switch (type.kind) {
     case "primitive":
@@ -613,7 +591,7 @@ export function typeToZig(type: IRType): string {
     case "optional":
       return `?${typeToZig(type.inner)}`;
     case "array":
-      return `std.ArrayList(${typeToZig(type.elementType)})`;
+      return `std.ArrayListUnmanaged(${typeToZig(type.elementType)})`;
     case "struct":
       return type.name;
     case "errorUnion":
@@ -642,10 +620,6 @@ export function typeToZig(type: IRType): string {
       return "anytype";
   }
 }
-
-// ===========================================
-// Helpers
-// ===========================================
 
 function sanitizeName(name: string): string {
   const zigKeywords = new Set([

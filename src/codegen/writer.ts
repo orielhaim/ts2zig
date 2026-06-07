@@ -24,7 +24,6 @@ export class ZigWriter {
   }
 
   toString(): string {
-    // Clean up excessive blank lines
     const result: string[] = [];
     let prevBlank = false;
 
@@ -35,7 +34,6 @@ export class ZigWriter {
       prevBlank = isBlank;
     }
 
-    // Ensure trailing newline
     const text = result.join("\n");
     return text.endsWith("\n") ? text : text + "\n";
   }

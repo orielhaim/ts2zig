@@ -1,5 +1,5 @@
 import { defineCommand } from "citty";
-import { resolve, join, relative, dirname, basename } from "path";
+import { resolve, join, dirname } from "path";
 import { mkdirSync, existsSync, writeFileSync } from "fs";
 import { compile } from "../../compiler";
 

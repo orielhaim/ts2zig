@@ -8,13 +8,10 @@ export function generateZig(
 ): string {
   const w = new ZigWriter();
 
-  // Std import
   w.writeLine('const std = @import("std");');
 
-  // Runtime import
   w.writeLine('const _rt = @import("_runtime.zig");');
 
-  // File imports
   for (const imp of module.imports) {
     const alias = imp.source
       .replace(/\.zig$/, "")
@@ -22,38 +19,147 @@ export function generateZig(
     w.writeLine(`const ${alias} = @import("${imp.source}");`);
   }
 
-  if (module.imports.length > 0 || true) {
-    w.writeLine("");
-  }
+  w.writeLine("");
 
-  // Error set (if any errors declared)
   if (module.errors.length > 0) {
     const errors = module.errors.join(", ");
     w.writeLine(`const AppError = error{ ${errors} };`);
     w.writeLine("");
   }
 
-  // Generate body
   for (const node of module.body) {
     generateNode(node, w, diagnostics, 0);
     w.writeLine("");
   }
 
-  // If module has main, generate the entry point with allocator
-  if (module.hasMain) {
-    generateMainWrapper(w);
+  switch (module.moduleKind) {
+    case "executable":
+      generateExecutableEntry(module, w, diagnostics);
+      break;
+    case "script":
+      generateScriptEntry(module, w, diagnostics);
+      break;
+    case "library":
+      break;
   }
 
   return w.toString();
 }
 
-function generateMainWrapper(w: ZigWriter): void {
+function generateExecutableEntry(
+  module: IRModule,
+  w: ZigWriter,
+  diagnostics: Diagnostic[],
+): void {
   w.writeLine("pub fn main() !void {");
   w.indent();
   w.writeLine("var gpa = std.heap.DebugAllocator(.{}){};");
   w.writeLine("defer _ = gpa.deinit();");
   w.writeLine("const allocator = gpa.allocator();");
-  w.writeLine("try tszig_main(allocator);");
+
+  if (module.scriptBody.length > 0) {
+    w.writeLine("");
+    for (const node of module.scriptBody) {
+      generateEntryNode(node, w, diagnostics);
+    }
+  } else {
+    w.writeLine("try tszig_main(allocator);");
+  }
+
   w.dedent();
   w.writeLine("}");
+}
+
+function generateScriptEntry(
+  module: IRModule,
+  w: ZigWriter,
+  diagnostics: Diagnostic[],
+): void {
+  const needsAllocator = scriptBodyNeedsAllocator(module.scriptBody);
+
+  w.writeLine("pub fn main() !void {");
+  w.indent();
+
+  if (needsAllocator) {
+    w.writeLine("var gpa = std.heap.DebugAllocator(.{}){};");
+    w.writeLine("defer _ = gpa.deinit();");
+    w.writeLine("const allocator = gpa.allocator();");
+  }
+
+  w.writeLine("");
+
+  for (const node of module.scriptBody) {
+    generateNode(node, w, diagnostics, 1);
+  }
+
+  w.dedent();
+  w.writeLine("}");
+}
+
+function generateEntryNode(
+  node: any,
+  w: ZigWriter,
+  diagnostics: Diagnostic[],
+): void {
+  if (isMainCall(node)) {
+    w.writeLine("try tszig_main(allocator);");
+    return;
+  }
+
+  if (node.kind === "expressionStatement" && isMainCall(node.expression)) {
+    w.writeLine("try tszig_main(allocator);");
+    return;
+  }
+
+  generateNode(node, w, diagnostics, 1);
+}
+
+function isMainCall(node: any): boolean {
+  if (!node) return false;
+  if (node.kind !== "call") return false;
+  const callee = node.callee;
+  if (!callee) return false;
+  if (callee.kind === "identifier" && callee.name === "main") return true;
+  if (callee.kind === "member" && callee.property === "main") return true;
+  return false;
+}
+
+function scriptBodyNeedsAllocator(nodes: any[]): boolean {
+  for (const node of nodes) {
+    if (deepNeedsAllocator(node)) return true;
+  }
+  return false;
+}
+
+function deepNeedsAllocator(node: any): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (node.kind === "arrayLiteral") return true;
+  if (node.kind === "templateLiteral") return true;
+  if (node.kind === "variable" && node.needsDefer) return true;
+  if (
+    node.kind === "binary" &&
+    node.operator === "+" &&
+    (isStringTyped(node.left) || isStringTyped(node.right))
+  ) {
+    return true;
+  }
+  for (const key of Object.keys(node)) {
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (deepNeedsAllocator(item)) return true;
+      }
+    } else if (val && typeof val === "object" && val.kind) {
+      if (deepNeedsAllocator(val)) return true;
+    }
+  }
+  return false;
+}
+
+function isStringTyped(node: any): boolean {
+  if (!node) return false;
+  if (node.kind === "literal" && typeof node.value === "string") return true;
+  if (node.type?.kind === "string") return true;
+  if (node.kind === "templateLiteral") return true;
+  return false;
 }
