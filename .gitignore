@@ -6,3 +6,4 @@ logs
 .env
 .cache
 output
+.cursor
