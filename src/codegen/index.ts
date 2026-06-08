@@ -1,6 +1,7 @@
 import type { IRModule, Diagnostic } from "../types";
 import { ZigWriter } from "./writer";
-import { generateNode, resetTempCounter } from "./zig-ast";
+import { generateNode } from "./statements";
+import { resetTempCounter, typeToZig } from "./utils";
 
 export function generateZig(
   module: IRModule,
@@ -38,6 +39,13 @@ export function generateZig(
   }
   if (importedNames.size > 0) {
     w.writeLine("");
+  }
+
+  if (module.hoistedFunctions && module.hoistedFunctions.length > 0) {
+    for (const fn of module.hoistedFunctions) {
+      generateNode(fn, w, diagnostics, 0);
+      w.writeLine("");
+    }
   }
 
   for (const node of module.body) {

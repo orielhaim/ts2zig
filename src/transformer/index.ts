@@ -1,6 +1,14 @@
 import * as ts from "typescript";
 import type { AnalysisResult } from "../analyzer";
-import type { Diagnostic, IRModule, IRNode, IRImport } from "../types";
+import type {
+  Diagnostic,
+  IRModule,
+  IRNode,
+  IRImport,
+  IRFunction,
+  IRArrowFunction,
+  IRStruct,
+} from "../types";
 import { transformFunction } from "./passes/functions";
 import { transformClass } from "./passes/classes";
 import { transformInterface, transformTypeAlias } from "./passes/types";
@@ -9,17 +17,24 @@ import { transformVariable } from "./passes/variables";
 import { transformStatement } from "./passes/statements";
 import { transformImport } from "./passes/modules";
 
+let _hoistCounter = 0;
+
 export function transformToIR(
   analysis: AnalysisResult,
   checker: ts.TypeChecker,
   diagnostics: Diagnostic[],
 ): IRModule {
+  _hoistCounter = 0;
+
   const ctx: TransformContext = {
     checker,
     sourceFile: analysis.sourceFile,
     diagnostics,
     exports: analysis.exports,
     errors: new Set<string>(),
+    hoistedFunctions: [],
+    anonStructs: [],
+    anonStructCache: new Map(),
   };
 
   const body: IRNode[] = [];
@@ -91,16 +106,102 @@ export function transformToIR(
     }
   }
 
+  hoistArrowFunctions(body, ctx);
+  hoistArrowFunctions(scriptBody, ctx);
+
   return {
     kind: "module",
     fileName: analysis.sourceFile.fileName,
     imports,
-    body,
+    body: [...ctx.anonStructs, ...body],
     errors: Array.from(ctx.errors),
     hasMain: analysis.hasMainFunction,
     moduleKind: analysis.moduleKind,
     scriptBody,
+    hoistedFunctions: ctx.hoistedFunctions,
   };
+}
+
+function hoistArrowFunctions(nodes: IRNode[], ctx: TransformContext): void {
+  for (let i = 0; i < nodes.length; i++) {
+    nodes[i] = visitAndHoist(nodes[i], ctx);
+  }
+}
+
+function visitAndHoist(node: IRNode, ctx: TransformContext): IRNode {
+  if (!node || typeof node !== "object") return node;
+
+  if (node.kind === "arrowFunction") {
+    const arrow = node as IRArrowFunction;
+    return hoistSingleArrow(arrow, ctx);
+  }
+
+  for (const key of Object.keys(node)) {
+    const val = (node as any)[key];
+    if (Array.isArray(val)) {
+      for (let i = 0; i < val.length; i++) {
+        if (val[i] && typeof val[i] === "object" && val[i].kind) {
+          val[i] = visitAndHoist(val[i], ctx);
+        }
+      }
+    } else if (val && typeof val === "object" && val.kind) {
+      (node as any)[key] = visitAndHoist(val, ctx);
+    }
+  }
+
+  return node;
+}
+
+function hoistSingleArrow(
+  arrow: IRArrowFunction,
+  ctx: TransformContext,
+): IRNode {
+  if (arrow.captures.length > 0) {
+    ctx.diagnostics.push({
+      severity: "warning",
+      message: `Arrow function captures variables [${arrow.captures.join(", ")}]. Closures with captures cannot be translated to Zig. Consider refactoring to avoid captures.`,
+      file: ctx.sourceFile.fileName,
+    });
+    return {
+      kind: "literal",
+      value: 0,
+      type: { kind: "primitive", name: "f64" },
+    } as IRNode;
+  }
+
+  const name = `__anon_fn_${_hoistCounter++}`;
+  arrow.hoistedName = name;
+
+  hoistArrowFunctions(arrow.body, ctx);
+
+  const fn: IRFunction = {
+    kind: "function",
+    name,
+    params: arrow.params.map((p) => ({
+      name: p.name,
+      type: p.type,
+      isOptional: false,
+    })),
+    returnType: arrow.returnType,
+    body: arrow.body,
+    isPublic: false,
+    isMethod: false,
+    isStatic: false,
+    needsAllocator: false,
+    isMain: false,
+  };
+
+  ctx.hoistedFunctions.push(fn);
+
+  return {
+    kind: "identifier",
+    name,
+    type: {
+      kind: "function",
+      params: arrow.params.map((p) => p.type),
+      returnType: arrow.returnType,
+    },
+  } as IRNode;
 }
 
 function collectOrderedScriptNodes(
@@ -140,4 +241,7 @@ export interface TransformContext {
   diagnostics: Diagnostic[];
   exports: Set<string>;
   errors: Set<string>;
+  hoistedFunctions: IRFunction[];
+  anonStructs: IRStruct[];
+  anonStructCache: Map<string, string>;
 }

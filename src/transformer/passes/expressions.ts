@@ -1,7 +1,13 @@
 import * as ts from "typescript";
 import type { TransformContext } from "../index";
-import { resolveType } from "../../analyzer/type-resolver";
-import type { IRNode, IRType } from "../../types";
+import {
+  resolveType,
+  resolveTypeFromNode,
+  resolveArrayElementTypeFromContext,
+  resolveNamedTypeForExpression,
+} from "../../analyzer/type-resolver";
+import { transformStatement } from "./statements";
+import type { IRField, IRNode, IRType } from "../../types";
 
 export function transformExpression(
   node: ts.Expression,
@@ -82,7 +88,6 @@ export function transformExpression(
     return { kind: "identifier", name: node.text, type };
   }
 
-  // Template literal
   if (ts.isTemplateExpression(node)) {
     const parts: (string | IRNode)[] = [];
     parts.push(node.head.text);
@@ -93,9 +98,11 @@ export function transformExpression(
     return { kind: "templateLiteral", parts };
   }
 
-  // Binary expression
+  if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+    return transformArrowFunction(node, ctx);
+  }
+
   if (ts.isBinaryExpression(node)) {
-    // Assignment
     if (isAssignmentOperator(node.operatorToken.kind)) {
       return {
         kind: "assignment",
@@ -205,10 +212,7 @@ export function transformExpression(
       }
     }
 
-    const resultType = resolveType(
-      ctx.checker.getTypeAtLocation(node),
-      ctx.checker,
-    );
+    const resultType = resolveCallResultType(node, ctx);
 
     const calleeAnalysis = analyzeCallee(node, ctx);
 
@@ -276,44 +280,92 @@ export function transformExpression(
   }
 
   if (ts.isArrayLiteralExpression(node)) {
-    const elements = node.elements.map((e) => transformExpression(e, ctx));
     let elementType: IRType = { kind: "unknown" };
 
-    const tsType = ctx.checker.getTypeAtLocation(node);
-    if (ctx.checker.isArrayType(tsType)) {
-      const typeArgs = (tsType as ts.TypeReference).typeArguments;
-      if (typeArgs && typeArgs.length > 0) {
-        elementType = resolveType(typeArgs[0], ctx.checker);
+    const contextElementType = resolveArrayElementTypeFromContext(
+      node,
+      ctx.checker,
+    );
+    if (contextElementType && contextElementType.kind !== "unknown") {
+      elementType = contextElementType;
+    } else {
+      const tsType = ctx.checker.getTypeAtLocation(node);
+      if (ctx.checker.isArrayType(tsType)) {
+        const typeArgs = (tsType as ts.TypeReference).typeArguments;
+        if (typeArgs && typeArgs.length > 0) {
+          elementType = resolveType(typeArgs[0], ctx.checker);
+        }
       }
     }
+
+    if (elementType.kind === "unknown" && typeHint) {
+      if (typeHint.kind === "array") {
+        elementType = typeHint.elementType;
+      }
+    }
+
+    const elements = node.elements.map((e) =>
+      transformExpression(e, ctx, elementType),
+    );
 
     return { kind: "arrayLiteral", elements, elementType };
   }
 
   // Object literal
   if (ts.isObjectLiteralExpression(node)) {
-    const properties: { name: string; value: IRNode }[] = [];
+    const properties: { name: string; value: IRNode; targetType?: IRType }[] =
+      [];
+
+    const contextualType = ctx.checker.getContextualType(node);
+    const targetTypeForField = (propName: string): IRType | undefined => {
+      const lookupType = contextualType ?? ctx.checker.getTypeAtLocation(node);
+      if (!lookupType) return undefined;
+      const propSymbol = lookupType.getProperty(propName);
+      if (!propSymbol) return undefined;
+      const propType = ctx.checker.getTypeOfSymbolAtLocation(propSymbol, node);
+      if (!propType) return undefined;
+      return resolveType(propType, ctx.checker);
+    };
 
     for (const prop of node.properties) {
       if (ts.isPropertyAssignment(prop) && prop.name) {
+        const name = prop.name.getText(ctx.sourceFile);
+        const targetType = targetTypeForField(name);
         properties.push({
-          name: prop.name.getText(ctx.sourceFile),
-          value: transformExpression(prop.initializer, ctx),
+          name,
+          value: transformExpression(prop.initializer, ctx, targetType),
+          targetType,
         });
       }
       if (ts.isShorthandPropertyAssignment(prop)) {
+        const name = prop.name.text;
+        const targetType = targetTypeForField(name);
         properties.push({
-          name: prop.name.text,
+          name,
           value: {
             kind: "identifier",
-            name: prop.name.text,
+            name,
             type: { kind: "unknown" },
           },
+          targetType,
         });
       }
     }
 
-    const typeName = resolveObjectLiteralTypeName(node, ctx, typeHint);
+    let typeName = resolveObjectLiteralTypeName(node, ctx, typeHint);
+
+    if (!typeName) {
+      typeName = synthesizeAnonStruct(node, properties, ctx);
+      const anon = ctx.anonStructs.find((s) => s.name === typeName);
+      if (anon) {
+        for (const p of properties) {
+          if (!p.targetType) {
+            const f = anon.fields.find((ff) => ff.name === p.name);
+            if (f) p.targetType = f.type;
+          }
+        }
+      }
+    }
 
     return {
       kind: "objectLiteral",
@@ -400,6 +452,144 @@ export function transformExpression(
   };
 }
 
+function resolveCallResultType(
+  node: ts.CallExpression,
+  ctx: TransformContext,
+): IRType {
+  const tsType = ctx.checker.getTypeAtLocation(node);
+  const resolved = resolveType(tsType, ctx.checker);
+
+  if (resolved.kind !== "unknown") {
+    return resolved;
+  }
+
+  const sig = ctx.checker.getResolvedSignature(node);
+  if (sig) {
+    const retType = ctx.checker.getReturnTypeOfSignature(sig);
+    return resolveType(retType, ctx.checker);
+  }
+
+  return resolved;
+}
+
+function transformArrowFunction(
+  node: ts.ArrowFunction | ts.FunctionExpression,
+  ctx: TransformContext,
+): IRNode {
+  const params: { name: string; type: IRType }[] = [];
+  for (const param of node.parameters) {
+    const paramName = param.name.getText(ctx.sourceFile);
+    const paramType = param.type
+      ? resolveTypeFromNode(param.type, ctx.checker, ctx.sourceFile)
+      : resolveType(ctx.checker.getTypeAtLocation(param), ctx.checker);
+
+    params.push({ name: paramName, type: paramType });
+  }
+
+  const sig = ctx.checker.getSignatureFromDeclaration(node);
+  let returnType: IRType = { kind: "unknown" };
+  if (sig) {
+    returnType = resolveType(
+      ctx.checker.getReturnTypeOfSignature(sig),
+      ctx.checker,
+    );
+  }
+
+  const body: IRNode[] = [];
+  if (node.body) {
+    if (ts.isBlock(node.body)) {
+      for (const stmt of node.body.statements) {
+        const result = transformStatement(stmt, ctx);
+        if (result) body.push(result);
+      }
+    } else {
+      const expr = transformExpression(node.body, ctx);
+      body.push({ kind: "return", value: expr });
+    }
+  }
+
+  const captures = detectCaptures(node, ctx);
+
+  return {
+    kind: "arrowFunction",
+    params,
+    returnType,
+    body,
+    captures,
+  };
+}
+
+function detectCaptures(
+  node: ts.ArrowFunction | ts.FunctionExpression,
+  ctx: TransformContext,
+): string[] {
+  const paramNames = new Set<string>();
+  for (const p of node.parameters) {
+    paramNames.add(p.name.getText(ctx.sourceFile));
+  }
+
+  const captured = new Set<string>();
+
+  function visit(n: ts.Node) {
+    if (ts.isIdentifier(n)) {
+      const name = n.text;
+      if (paramNames.has(name)) return;
+      if (name === "undefined" || name === "console") return;
+
+      const sym = ctx.checker.getSymbolAtLocation(n);
+      if (sym && sym.declarations && sym.declarations.length > 0) {
+        const decl = sym.declarations[0];
+        let parent: ts.Node | undefined = decl;
+        let isLocal = false;
+        while (parent) {
+          if (parent === node) {
+            isLocal = true;
+            break;
+          }
+          parent = parent.parent;
+        }
+        if (!isLocal) {
+          if (
+            ts.isVariableDeclaration(decl) ||
+            ts.isParameter(decl) ||
+            ts.isBindingElement(decl)
+          ) {
+            const declParent = findEnclosingFunction(decl);
+            const arrowParent = findEnclosingFunction(node);
+            if (declParent && declParent === arrowParent) {
+              captured.add(name);
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  }
+
+  if (node.body) {
+    ts.forEachChild(node.body, visit);
+  }
+
+  return Array.from(captured);
+}
+
+function findEnclosingFunction(node: ts.Node): ts.Node | null {
+  let current = node.parent;
+  while (current) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isArrowFunction(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isConstructorDeclaration(current)
+    ) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
 function analyzeCallee(
   node: ts.CallExpression,
   ctx: TransformContext,
@@ -427,7 +617,7 @@ function analyzeCallee(
   let returnsError = false;
 
   function visit(n: ts.Node) {
-    if (needsAllocator && returnsError) return; // short-circuit
+    if (needsAllocator && returnsError) return;
 
     if (ts.isArrayLiteralExpression(n)) {
       needsAllocator = true;
@@ -446,9 +636,6 @@ function analyzeCallee(
       ) {
         needsAllocator = true;
       }
-    }
-    if (ts.isNewExpression(n)) {
-      needsAllocator = true;
     }
 
     if (ts.isThrowStatement(n)) {
@@ -472,6 +659,9 @@ function resolveObjectLiteralTypeName(
   ctx: TransformContext,
   typeHint?: IRType,
 ): string | undefined {
+  const namedType = resolveNamedTypeForExpression(node, ctx.checker);
+  if (namedType) return namedType;
+
   const contextualType = ctx.checker.getContextualType(node);
   if (contextualType) {
     const contextSymbol =
@@ -585,5 +775,77 @@ function mapPrefixUnaryOperator(op: ts.PrefixUnaryOperator): string {
       return "~";
     default:
       return "!";
+  }
+}
+
+function synthesizeAnonStruct(
+  node: ts.ObjectLiteralExpression,
+  properties: { name: string; value: IRNode }[],
+  ctx: TransformContext,
+): string {
+  const fieldDescriptors: { name: string; type: IRType }[] = [];
+
+  for (const prop of node.properties) {
+    if (ts.isPropertyAssignment(prop) && prop.name) {
+      const propName = prop.name.getText(ctx.sourceFile);
+      const tsType = ctx.checker.getTypeAtLocation(prop.initializer);
+      const irType = resolveType(tsType, ctx.checker);
+      fieldDescriptors.push({ name: propName, type: irType });
+    } else if (ts.isShorthandPropertyAssignment(prop)) {
+      const propName = prop.name.text;
+      const tsType = ctx.checker.getTypeAtLocation(prop.name);
+      const irType = resolveType(tsType, ctx.checker);
+      fieldDescriptors.push({ name: propName, type: irType });
+    }
+  }
+
+  const shapeKey = fieldDescriptors
+    .map((f) => `${f.name}:${irTypeKey(f.type)}`)
+    .join("|");
+
+  const cached = ctx.anonStructCache.get(shapeKey);
+  if (cached) return cached;
+
+  const name = `__AnonStruct_${ctx.anonStructs.length}`;
+  ctx.anonStructCache.set(shapeKey, name);
+
+  const fields: IRField[] = fieldDescriptors.map((f) => ({
+    name: f.name,
+    type:
+      f.type.kind === "unknown" ? { kind: "primitive", name: "f64" } : f.type,
+    isPublic: true,
+    isOptional: f.type.kind === "optional",
+  }));
+
+  ctx.anonStructs.push({
+    kind: "struct",
+    name,
+    fields,
+    methods: [],
+    isPublic: false,
+    hasInit: false,
+  });
+
+  return name;
+}
+
+function irTypeKey(t: IRType): string {
+  switch (t.kind) {
+    case "primitive":
+      return `p:${t.name}`;
+    case "string":
+      return "s";
+    case "array":
+      return `a:${irTypeKey(t.elementType)}`;
+    case "optional":
+      return `o:${irTypeKey(t.inner)}`;
+    case "struct":
+      return `st:${t.name}`;
+    case "enum":
+      return `e:${t.name}`;
+    case "function":
+      return "fn";
+    default:
+      return "u";
   }
 }

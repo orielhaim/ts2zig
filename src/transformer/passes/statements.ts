@@ -240,11 +240,87 @@ function transformForOf(
   const iterable = transformExpression(node.expression, ctx);
   const body = transformStatementToBody(node.statement, ctx);
 
-  return {
+  const itemType = resolveIterationItemType(node, ctx);
+  const needsMutable = detectMutableUsageInForOf(node, itemName, ctx);
+
+  const result: any = {
     kind: "for",
     variant: "of",
     itemName,
     iterable,
     body,
   };
+
+  if (needsMutable) {
+    result.needsMutableCapture = true;
+  }
+
+  return result;
+}
+
+function detectMutableUsageInForOf(
+  node: ts.ForOfStatement,
+  itemName: string,
+  ctx: TransformContext,
+): boolean {
+  const body = node.statement;
+
+  let isMutable = false;
+
+  function visit(n: ts.Node): void {
+    if (isMutable) return;
+
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const obj = n.expression.expression;
+      if (ts.isIdentifier(obj) && obj.text === itemName) {
+        const methodName = n.expression.name.text;
+        const objType = ctx.checker.getTypeAtLocation(obj);
+        const symbol = objType.getProperty(methodName);
+        if (symbol && symbol.declarations) {
+          for (const decl of symbol.declarations) {
+            if (ts.isMethodDeclaration(decl)) {
+              const isStatic = decl.modifiers?.some(
+                (m) => m.kind === ts.SyntaxKind.StaticKeyword,
+              );
+              if (!isStatic) {
+                isMutable = true;
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(n.left)
+    ) {
+      const obj = n.left.expression;
+      if (ts.isIdentifier(obj) && obj.text === itemName) {
+        isMutable = true;
+        return;
+      }
+    }
+
+    ts.forEachChild(n, visit);
+  }
+
+  ts.forEachChild(body, visit);
+  return isMutable;
+}
+
+function resolveIterationItemType(
+  node: ts.ForOfStatement,
+  ctx: TransformContext,
+): any {
+  const exprType = ctx.checker.getTypeAtLocation(node.expression);
+  if (ctx.checker.isArrayType(exprType)) {
+    const typeArgs = (exprType as any).typeArguments;
+    if (typeArgs && typeArgs.length > 0) {
+      return resolveType(typeArgs[0], ctx.checker);
+    }
+  }
+  return null;
 }

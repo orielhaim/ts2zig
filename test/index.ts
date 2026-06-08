@@ -1,35 +1,81 @@
-import { Calculator, greet, type User } from "./math";
+import { BankAccount, factorial, double, isRich, type Person } from "./models";
+
+import { map, filter } from "./utils";
+
+function getBalance(account: BankAccount): number {
+  return account.getBalance();
+}
 
 function main(): void {
-  const calc = new Calculator();
+  const people: Person[] = [
+    {
+      id: 101,
+      name: "Alice",
+    },
+    {
+      id: 102,
+      name: "Bob",
+    },
+    {
+      id: 103,
+      name: "Charlie",
+    },
+  ];
 
-  const a = calc.add(10, 20);
-  const b = calc.multiply(a, 2);
+  const accounts: BankAccount[] = [];
 
-  console.log(`a = ${a}`);
-  console.log(`b = ${b}`);
+  for (const person of people) {
+    const account = BankAccount.create(person, person.id * 10);
 
-  const numbers: number[] = [10, 20, 30, 40];
-  const avg = Calculator.average(numbers);
+    account.deposit(50);
+    account.withdraw(25);
 
-  console.log(`average = ${avg}`);
-
-  const user: User = {
-    id: 1,
-    name: "Oriel",
-  };
-
-  console.log(greet(user));
-  console.log(greet(user, "Welcome"));
-
-  for (const entry of calc.getHistory()) {
-    console.log(`history: ${entry}`);
+    accounts.push(account);
   }
 
-  if (avg > 20) {
-    console.log("average is high");
+  const balances = map(accounts, getBalance);
+
+  const doubledBalances = map(balances, double);
+
+  const richBalances = filter(doubledBalances, isRich);
+
+  const stats = {
+    accountCount: accounts.length,
+    totalBalance: 0,
+  };
+
+  for (const value of doubledBalances) {
+    stats.totalBalance += value;
+  }
+
+  console.log("Balances:");
+
+  for (const value of balances) {
+    console.log(value);
+  }
+
+  console.log("Doubled:");
+
+  for (const value of doubledBalances) {
+    console.log(value);
+  }
+
+  console.log("Rich:");
+
+  for (const value of richBalances) {
+    console.log(value);
+  }
+
+  console.log(`accounts=${stats.accountCount}`);
+
+  console.log(`total=${stats.totalBalance}`);
+
+  console.log(`factorial(6)=${factorial(6)}`);
+
+  if (stats.totalBalance > 5000) {
+    console.log("large bank");
   } else {
-    console.log("average is low");
+    console.log("small bank");
   }
 }
 

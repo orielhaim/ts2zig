@@ -49,7 +49,9 @@ export type IRNode =
   | IREnum
   | IROptionalChain
   | IRNullishCoalesce
-  | IRTypeAlias;
+  | IRTypeAlias
+  | IRArrowFunction;
+
 export interface IRModule {
   kind: "module";
   fileName: string;
@@ -59,6 +61,7 @@ export interface IRModule {
   hasMain: boolean;
   moduleKind: "library" | "executable" | "script";
   scriptBody: IRNode[]; // imperative statements → go inside generated main()
+  hoistedFunctions: IRFunction[]; // arrow functions extracted to module level
 }
 
 export interface IRImport {
@@ -76,8 +79,10 @@ export interface IRFunction {
   isPublic: boolean;
   isMethod: boolean;
   isStatic: boolean;
+  isReadOnly?: boolean;
   needsAllocator: boolean;
   isMain: boolean;
+  isGeneric?: boolean;
 }
 
 export interface IRParam {
@@ -217,7 +222,7 @@ export interface IRArrayLiteral {
 
 export interface IRObjectLiteral {
   kind: "objectLiteral";
-  properties: { name: string; value: IRNode }[];
+  properties: { name: string; value: IRNode; targetType?: IRType }[];
   typeName?: string;
 }
 
@@ -277,9 +282,14 @@ export interface IRTypeAlias {
   isPublic: boolean;
 }
 
-// ============================================================
-// IR Type System
-// ============================================================
+export interface IRArrowFunction {
+  kind: "arrowFunction";
+  params: { name: string; type: IRType }[];
+  returnType: IRType;
+  body: IRNode[];
+  captures: string[];
+  hoistedName?: string; // filled in after hoisting
+}
 
 export type IRType =
   | {
@@ -301,4 +311,5 @@ export type IRType =
       variants: { name: string; type: IRType }[];
     }
   | { kind: "anyopaque" }
+  | { kind: "generic"; name: string }
   | { kind: "unknown" };

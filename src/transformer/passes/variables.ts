@@ -34,7 +34,7 @@ export function transformVariable(
     ? transformExpression(decl.initializer, ctx, type)
     : undefined;
 
-  const needsMutable = tsIsConst && isMutableClassInstance(decl, ctx);
+  const needsMutable = tsIsConst && needsMutableBinding(decl, ctx);
   const isConst = tsIsConst && !needsMutable;
 
   return {
@@ -47,16 +47,96 @@ export function transformVariable(
   };
 }
 
-function isMutableClassInstance(
+function needsMutableBinding(
   decl: ts.VariableDeclaration,
   ctx: TransformContext,
 ): boolean {
-  if (!decl.initializer || !ts.isNewExpression(decl.initializer)) {
-    return false;
+  const name = decl.name.getText(ctx.sourceFile);
+
+  const tsType = ctx.checker.getTypeAtLocation(decl);
+  const hasInstanceMethods = typeHasInstanceMethods(tsType, ctx);
+  if (
+    hasInstanceMethods &&
+    isUsedMutablyInScope(name, findContainingScope(decl), ctx)
+  ) {
+    return true;
   }
 
-  const tsType = ctx.checker.getTypeAtLocation(decl.initializer);
-  const symbol = tsType.getSymbol();
+  const scope = findContainingScope(decl);
+  if (scope && hasFieldAssignmentInScope(name, scope)) {
+    return true;
+  }
+
+  return false;
+}
+
+function findContainingScope(decl: ts.VariableDeclaration): ts.Node | null {
+  let current: ts.Node | undefined = decl.parent;
+  while (current) {
+    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+      return current;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+function hasFieldAssignmentInScope(varName: string, scope: ts.Node): boolean {
+  let found = false;
+
+  function visit(n: ts.Node): void {
+    if (found) return;
+
+    if (
+      ts.isBinaryExpression(n) &&
+      isAssignmentOperator(n.operatorToken.kind)
+    ) {
+      const left = n.left;
+      if (
+        ts.isPropertyAccessExpression(left) &&
+        ts.isIdentifier(left.expression) &&
+        left.expression.text === varName
+      ) {
+        found = true;
+        return;
+      }
+    }
+
+    if (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) {
+      const operand = n.operand;
+      if (
+        ts.isPropertyAccessExpression(operand) &&
+        ts.isIdentifier(operand.expression) &&
+        operand.expression.text === varName
+      ) {
+        found = true;
+        return;
+      }
+    }
+
+    ts.forEachChild(n, visit);
+  }
+
+  ts.forEachChild(scope, visit);
+  return found;
+}
+
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    kind === ts.SyntaxKind.PlusEqualsToken ||
+    kind === ts.SyntaxKind.MinusEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskEqualsToken ||
+    kind === ts.SyntaxKind.SlashEqualsToken ||
+    kind === ts.SyntaxKind.PercentEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandEqualsToken ||
+    kind === ts.SyntaxKind.BarEqualsToken ||
+    kind === ts.SyntaxKind.CaretEqualsToken
+  );
+}
+
+function typeHasInstanceMethods(type: ts.Type, ctx: TransformContext): boolean {
+  const symbol = type.getSymbol();
   if (!symbol || !symbol.declarations) return false;
 
   for (const d of symbol.declarations) {
@@ -73,4 +153,56 @@ function isMutableClassInstance(
   }
 
   return false;
+}
+
+function isUsedMutablyInScope(
+  varName: string,
+  scope: ts.Node | null,
+  ctx: TransformContext,
+): boolean {
+  if (!scope) return false;
+  let isMutable = false;
+
+  function visit(n: ts.Node): void {
+    if (isMutable) return;
+
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+      const obj = n.expression.expression;
+      if (ts.isIdentifier(obj) && obj.text === varName) {
+        const methodName = n.expression.name.text;
+        const objType = ctx.checker.getTypeAtLocation(obj);
+        const methodSymbol = objType.getProperty(methodName);
+        if (methodSymbol && methodSymbol.declarations) {
+          for (const decl of methodSymbol.declarations) {
+            if (
+              ts.isMethodDeclaration(decl) &&
+              !decl.modifiers?.some(
+                (m) => m.kind === ts.SyntaxKind.StaticKeyword,
+              )
+            ) {
+              isMutable = true;
+              return;
+            }
+          }
+        }
+      }
+    }
+
+    if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(n.left)
+    ) {
+      const obj = n.left.expression;
+      if (ts.isIdentifier(obj) && obj.text === varName) {
+        isMutable = true;
+        return;
+      }
+    }
+
+    ts.forEachChild(n, visit);
+  }
+
+  ts.forEachChild(scope, visit);
+  return isMutable;
 }

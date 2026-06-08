@@ -202,6 +202,8 @@ export function transformClass(
         (m) => m.kind === ts.SyntaxKind.StaticKeyword,
       );
 
+      const isReadOnly = !isStatic && !methodMutatesSelf(member.body, ctx);
+
       if (fnNeedsAllocator) {
         returnType = { kind: "errorUnion", okType: returnType };
       }
@@ -215,6 +217,7 @@ export function transformClass(
         isPublic: true,
         isMethod: true,
         isStatic,
+        isReadOnly,
         needsAllocator: fnNeedsAllocator,
         isMain: false,
       });
@@ -299,8 +302,39 @@ function methodBodyAllocates(
       }
     }
 
-    if (ts.isNewExpression(node)) {
-      allocates = true;
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(body, visit);
+  return allocates;
+}
+
+function methodMutatesSelf(
+  body: ts.Block | undefined,
+  ctx: TransformContext,
+): boolean {
+  if (!body) return false;
+  let mutates = false;
+
+  function visit(node: ts.Node): void {
+    if (mutates) return;
+
+    if (
+      ts.isBinaryExpression(node) &&
+      isAssignmentOperatorKind(node.operatorToken.kind) &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.expression.kind === ts.SyntaxKind.ThisKeyword
+    ) {
+      mutates = true;
+      return;
+    }
+
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+    ) {
+      mutates = true;
       return;
     }
 
@@ -308,5 +342,19 @@ function methodBodyAllocates(
   }
 
   ts.forEachChild(body, visit);
-  return allocates;
+  return mutates;
+}
+
+function isAssignmentOperatorKind(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.EqualsToken ||
+    kind === ts.SyntaxKind.PlusEqualsToken ||
+    kind === ts.SyntaxKind.MinusEqualsToken ||
+    kind === ts.SyntaxKind.AsteriskEqualsToken ||
+    kind === ts.SyntaxKind.SlashEqualsToken ||
+    kind === ts.SyntaxKind.PercentEqualsToken ||
+    kind === ts.SyntaxKind.AmpersandEqualsToken ||
+    kind === ts.SyntaxKind.BarEqualsToken ||
+    kind === ts.SyntaxKind.CaretEqualsToken
+  );
 }
