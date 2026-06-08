@@ -931,7 +931,14 @@ function generateIf(
   }
   w.indent();
   for (const child of node.thenBody) {
-    if (gm) {
+    generateBodyNode(child, w, diagnostics, depth + 1, gm, functionReturnType);
+  }
+  w.dedent();
+
+  if (node.elseBody && node.elseBody.length > 0) {
+    w.writeLine("} else {");
+    w.indent();
+    for (const child of node.elseBody) {
       generateBodyNode(
         child,
         w,
@@ -940,28 +947,6 @@ function generateIf(
         gm,
         functionReturnType,
       );
-    } else {
-      generateNode(child, w, diagnostics, depth + 1);
-    }
-  }
-  w.dedent();
-
-  if (node.elseBody && node.elseBody.length > 0) {
-    w.writeLine("} else {");
-    w.indent();
-    for (const child of node.elseBody) {
-      if (gm) {
-        generateBodyNode(
-          child,
-          w,
-          diagnostics,
-          depth + 1,
-          gm,
-          functionReturnType,
-        );
-      } else {
-        generateNode(child, w, diagnostics, depth + 1);
-      }
     }
     w.dedent();
   }
@@ -981,18 +966,7 @@ function generateWhile(
   w.writeLine(`while (${cond}) {`);
   w.indent();
   for (const child of node.body) {
-    if (gm) {
-      generateBodyNode(
-        child,
-        w,
-        diagnostics,
-        depth + 1,
-        gm,
-        functionReturnType,
-      );
-    } else {
-      generateNode(child, w, diagnostics, depth + 1);
-    }
+    generateBodyNode(child, w, diagnostics, depth + 1, gm, functionReturnType);
   }
   w.dedent();
   w.writeLine("}");
@@ -1027,16 +1001,14 @@ function generateFor(
     w.writeLine(`for (0..${endStr}) |${sanitizeName(node.itemName)}| {`);
     w.indent();
     for (const child of node.body) {
-      if (gm)
-        generateBodyNode(
-          child,
-          w,
-          diagnostics,
-          depth + 1,
-          gm,
-          functionReturnType,
-        );
-      else generateNode(child, w, diagnostics, depth + 1);
+      generateBodyNode(
+        child,
+        w,
+        diagnostics,
+        depth + 1,
+        gm,
+        functionReturnType,
+      );
     }
     w.dedent();
     w.writeLine("}");
@@ -1053,16 +1025,14 @@ function generateFor(
     w.writeLine(`for (${iterable}.items) ${capture} {`);
     w.indent();
     for (const child of node.body) {
-      if (gm)
-        generateBodyNode(
-          child,
-          w,
-          diagnostics,
-          depth + 1,
-          gm,
-          functionReturnType,
-        );
-      else generateNode(child, w, diagnostics, depth + 1);
+      generateBodyNode(
+        child,
+        w,
+        diagnostics,
+        depth + 1,
+        gm,
+        functionReturnType,
+      );
     }
     w.dedent();
     w.writeLine("}");

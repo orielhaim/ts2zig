@@ -1,28 +1,70 @@
 import type { IRFunction, IRModule, Diagnostic } from "../types";
 import { ZigWriter } from "./writer";
 import { generateNode } from "./statements";
-import { resetTempCounter, initStructHierarchy } from "./utils";
+import {
+  resetTempCounter,
+  initStructHierarchy,
+  collectReferencedStructs,
+  type TypeExportMap,
+} from "./utils";
 
 export function generateZig(
   module: IRModule,
   diagnostics: Diagnostic[],
+  typeExports?: TypeExportMap,
+  allModules?: IRModule[],
 ): string {
   resetTempCounter();
-  initStructHierarchy(module);
+  initStructHierarchy(allModules ?? [module]);
   const w = new ZigWriter();
 
   w.writeLine('const std = @import("std");');
   w.writeLine('const _rt = @import("_runtime.zig");');
 
   const importedNames = new Map<string, string>();
+  const importedAliases = new Set<string>();
 
   for (const imp of module.imports) {
     const alias = imp.source
       .replace(/\.zig$/, "")
       .replace(/[^a-zA-Z0-9_]/g, "_");
     w.writeLine(`const ${alias} = @import("${imp.source}");`);
+    importedAliases.add(alias);
 
     for (const name of imp.names) {
+      importedNames.set(name, alias);
+    }
+  }
+
+  const localStructs = new Set(
+    module.body
+      .filter((n) => n.kind === "struct")
+      .map((n) => (n as { name: string }).name),
+  );
+  const referencedStructs = collectReferencedStructs(module);
+  const extraByModule = new Map<
+    string,
+    { source: string; names: Set<string> }
+  >();
+
+  for (const structName of referencedStructs) {
+    if (localStructs.has(structName) || importedNames.has(structName)) continue;
+    const exp = typeExports?.get(structName);
+    if (!exp) continue;
+    let entry = extraByModule.get(exp.alias);
+    if (!entry) {
+      entry = { source: exp.source, names: new Set() };
+      extraByModule.set(exp.alias, entry);
+    }
+    entry.names.add(structName);
+  }
+
+  for (const [alias, entry] of extraByModule) {
+    if (!importedAliases.has(alias)) {
+      w.writeLine(`const ${alias} = @import("${entry.source}");`);
+      importedAliases.add(alias);
+    }
+    for (const name of entry.names) {
       importedNames.set(name, alias);
     }
   }
@@ -208,5 +250,15 @@ function isStringTyped(node: any): boolean {
   if (node.kind === "literal" && typeof node.value === "string") return true;
   if (node.type?.kind === "string") return true;
   if (node.kind === "templateLiteral") return true;
+  if (node.resultType?.kind === "string") return true;
+  if (node.resultType?.kind === "errorUnion") {
+    return node.resultType.okType?.kind === "string";
+  }
+  if (node.kind === "binary" && node.operator === "+") {
+    return isStringTyped(node.left) || isStringTyped(node.right);
+  }
+  if (node.kind === "call" && node.resultType) {
+    return isStringTyped({ resultType: node.resultType });
+  }
   return false;
 }

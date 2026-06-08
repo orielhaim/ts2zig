@@ -249,7 +249,7 @@ function bodyHasThrow(body: ts.Block | undefined): boolean {
   return has;
 }
 
-function suppressDeferForEscapingVars(body: IRNode[]): void {
+export function suppressDeferForEscapingVars(body: IRNode[]): void {
   const escapingNames = new Set<string>();
 
   const collectIdentifiers = (n: any, out: Set<string>): void => {
@@ -286,12 +286,7 @@ function suppressDeferForEscapingVars(body: IRNode[]): void {
 
   const clear = (n: any): void => {
     if (!n || typeof n !== "object") return;
-    if (
-      n.kind === "variable" &&
-      n.needsDefer &&
-      n.value?.kind === "arrayLiteral" &&
-      escapingNames.has(n.name)
-    ) {
+    if (n.kind === "variable" && n.needsDefer && escapingNames.has(n.name)) {
       n.needsDefer = false;
     }
     for (const key of Object.keys(n)) {

@@ -4,8 +4,9 @@ import { readdirSync, statSync } from "node:fs";
 import { analyzeSourceFile } from "../analyzer";
 import { transformToIR } from "../transformer";
 import { generateZig } from "../codegen";
+import type { TypeExportMap } from "../codegen/utils";
 import { generateRuntime } from "../runtime/generate";
-import type { Diagnostic, CompileResult, OutputFile } from "../types";
+import type { Diagnostic, CompileResult, OutputFile, IRModule } from "../types";
 
 function findTsFiles(dir: string): string[] {
   const results: string[] = [];
@@ -50,6 +51,40 @@ function findTsFiles(dir: string): string[] {
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+function zigModuleAlias(zigPath: string): string {
+  return zigPath.replace(/\.zig$/, "").replace(/[^a-zA-Z0-9_]/g, "_");
+}
+
+function buildTypeExportMap(
+  program: ts.Program,
+  inputDir: string,
+): TypeExportMap {
+  const map: TypeExportMap = new Map();
+  const normalizedInput = normalizePath(resolve(inputDir));
+
+  for (const sourceFile of program.getSourceFiles()) {
+    if (sourceFile.isDeclarationFile) continue;
+    const normalizedPath = normalizePath(resolve(sourceFile.fileName));
+    if (!normalizedPath.startsWith(normalizedInput)) continue;
+
+    const zigPath = relative(inputDir, sourceFile.fileName)
+      .replace(/\.ts$/, ".zig")
+      .replace(/\\/g, "/");
+    const alias = zigModuleAlias(zigPath);
+
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
+      const isExported = stmt.modifiers?.some(
+        (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+      );
+      if (!isExported) continue;
+      map.set(stmt.name.text, { alias, source: zigPath });
+    }
+  }
+
+  return map;
 }
 
 export function compile(
@@ -110,7 +145,13 @@ export function compile(
     }
   }
 
-  let hasEntryPoint = false;
+  const typeExports = buildTypeExportMap(program, resolvedInputDir);
+
+  const compiledModules: {
+    relativePath: string;
+    zigPath: string;
+    ir: IRModule;
+  }[] = [];
 
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile) continue;
@@ -126,13 +167,26 @@ export function compile(
     try {
       const analysis = analyzeSourceFile(sourceFile, checker, diagnostics);
       const ir = transformToIR(analysis, checker, diagnostics);
-      const zigCode = generateZig(ir, diagnostics);
-
-      files.push({ path: zigPath, content: zigCode });
+      compiledModules.push({ relativePath, zigPath, ir });
 
       if (analysis.hasMainFunction) {
         hasEntryPoint = true;
       }
+    } catch (err: any) {
+      diagnostics.push({
+        severity: "error",
+        message: `Failed to compile ${relativePath}: ${err.message}\n${err.stack}`,
+        file: relativePath,
+      });
+    }
+  }
+
+  const allIr = compiledModules.map((entry) => entry.ir);
+
+  for (const { relativePath, zigPath, ir } of compiledModules) {
+    try {
+      const zigCode = generateZig(ir, diagnostics, typeExports, allIr);
+      files.push({ path: zigPath, content: zigCode });
     } catch (err: any) {
       diagnostics.push({
         severity: "error",

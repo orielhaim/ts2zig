@@ -3,6 +3,7 @@ import {
   sanitizeName,
   escapeZigString,
   isStringNode,
+  concatOperand,
   getNodeType,
   formatSpecForType,
   isArithmeticOp,
@@ -30,7 +31,9 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
         op === "+" &&
         (isStringNode((node as any).left) || isStringNode((node as any).right))
       ) {
-        return `_rt.concat(allocator, ${left}, ${right})`;
+        const leftArg = concatOperand(left, (node as any).left);
+        const rightArg = concatOperand(right, (node as any).right);
+        return `_rt.concat(allocator, ${leftArg}, ${rightArg})`;
       }
 
       if (isArithmeticOp(op)) {
@@ -49,6 +52,15 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
         const leftCoerced = coerce(left, lt, target);
         const rightCoerced = coerce(right, rt, target);
         return `${leftCoerced} ${op} ${rightCoerced}`;
+      }
+
+      if (op === "==" || op === "!=") {
+        const lt = getNodeType((node as any).left);
+        const rt = getNodeType((node as any).right);
+        if (lt.kind === "string" || rt.kind === "string") {
+          const cmp = `std.mem.eql(u8, ${left}, ${right})`;
+          return op === "==" ? cmp : `!${cmp}`;
+        }
       }
 
       return `${left} ${op} ${right}`;

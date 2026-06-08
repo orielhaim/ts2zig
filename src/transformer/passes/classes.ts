@@ -3,7 +3,7 @@ import type { TransformContext } from "../index";
 import { blockAllocates, bodyMutatesThis } from "../../analyzer/allocation";
 import { resolveType, resolveTypeFromNode } from "../../analyzer/type-resolver";
 import { transformExpression } from "./expressions";
-import { replaceGenericTypes } from "./functions";
+import { replaceGenericTypes, suppressDeferForEscapingVars } from "./functions";
 import { transformStatement } from "./statements";
 import type {
   IRStruct,
@@ -691,6 +691,8 @@ function buildMethod(
       if (r) body.push(r);
     }
   }
+
+  suppressDeferForEscapingVars(body);
 
   const isStatic = !!member.modifiers?.some(
     (m) => m.kind === ts.SyntaxKind.StaticKeyword,

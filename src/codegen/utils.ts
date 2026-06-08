@@ -1,4 +1,12 @@
-import type { IRModule, IRNode, IRType } from "../types";
+import type {
+  IRFunction,
+  IRModule,
+  IRNode,
+  IRType,
+  IRVariable,
+} from "../types";
+
+export type TypeExportMap = Map<string, { alias: string; source: string }>;
 
 let _tempVarCounter = 0;
 
@@ -11,17 +19,20 @@ type StructInfo = {
 };
 let structHierarchy = new Map<string, StructInfo>();
 
-export function initStructHierarchy(module: IRModule): void {
+export function initStructHierarchy(modules: IRModule | IRModule[]): void {
   structHierarchy = new Map();
-  for (const node of module.body) {
-    if (node.kind === "struct") {
-      structHierarchy.set(node.name, {
-        baseClass: node.baseClass,
-        ownFieldCount: node.fields.length,
-        isAbstract: node.isAbstract ?? false,
-        typeParameters: node.typeParameters,
-        baseInstantiatedType: node.baseInstantiatedType,
-      });
+  const list = Array.isArray(modules) ? modules : [modules];
+  for (const module of list) {
+    for (const node of module.body) {
+      if (node.kind === "struct") {
+        structHierarchy.set(node.name, {
+          baseClass: node.baseClass,
+          ownFieldCount: node.fields.length,
+          isAbstract: node.isAbstract ?? false,
+          typeParameters: node.typeParameters,
+          baseInstantiatedType: node.baseInstantiatedType,
+        });
+      }
     }
   }
 }
@@ -359,13 +370,27 @@ export function coerce(
   return expr;
 }
 
+export function isStringType(type: IRType): boolean {
+  if (type.kind === "string") return true;
+  if (type.kind === "errorUnion") return isStringType(type.okType);
+  return false;
+}
+
 export function isStringNode(node: IRNode): boolean {
   if (node.kind === "literal" && typeof (node as any).value === "string")
     return true;
   if (node.kind === "identifier" && (node as any).type?.kind === "string")
     return true;
   if (node.kind === "templateLiteral") return true;
-  return false;
+  return isStringType(getNodeType(node));
+}
+
+export function concatOperand(expr: string, node: IRNode): string {
+  const t = getNodeType(node);
+  if (t.kind === "errorUnion" && !expr.startsWith("try ")) {
+    return `try ${expr}`;
+  }
+  return expr;
 }
 
 export function getNodeType(node: IRNode): IRType {
@@ -477,6 +502,287 @@ export function isArithmeticOp(op: string): boolean {
 export function isFloatTyped(node: IRNode): boolean {
   const t = getNodeType(node);
   return t.kind === "primitive" && t.name === "f64";
+}
+
+function collectTypesFromIRType(
+  type: IRType | undefined,
+  out: Set<string>,
+): void {
+  if (!type?.kind) return;
+
+  switch (type.kind) {
+    case "struct":
+    case "enum":
+      out.add(type.name);
+      break;
+    case "optional":
+    case "pointer":
+      collectTypesFromIRType(type.inner, out);
+      break;
+    case "slice":
+      collectTypesFromIRType(type.elementType, out);
+      break;
+    case "array":
+      collectTypesFromIRType(type.elementType, out);
+      break;
+    case "errorUnion":
+      collectTypesFromIRType(type.okType, out);
+      break;
+    case "tuple":
+      for (const e of type.elements) collectTypesFromIRType(e, out);
+      break;
+    case "function":
+      for (const p of type.params) collectTypesFromIRType(p, out);
+      collectTypesFromIRType(type.returnType, out);
+      break;
+    case "instantiatedStruct":
+      out.add(type.base);
+      break;
+    case "taggedUnion":
+      for (const v of type.variants) collectTypesFromIRType(v.type, out);
+      break;
+    default:
+      break;
+  }
+}
+
+function walkIRNodes(nodes: IRNode[] | undefined, out: Set<string>): void {
+  if (!nodes) return;
+  for (const node of nodes) collectTypesFromIRNode(node, out);
+}
+
+function collectTypesFromIRNode(node: IRNode, out: Set<string>): void {
+  if (!node || typeof node !== "object" || !("kind" in node)) return;
+
+  switch (node.kind) {
+    case "variable": {
+      const v = node as IRVariable;
+      collectTypesFromIRType(v.type, out);
+      if (v.value) collectTypesFromIRNode(v.value, out);
+      break;
+    }
+    case "function": {
+      const fn = node as IRFunction;
+      if (!Array.isArray(fn.body)) {
+        collectTypesFromIRType(node as unknown as IRType, out);
+        break;
+      }
+      for (const p of fn.params) collectTypesFromIRType(p.type, out);
+      collectTypesFromIRType(fn.returnType, out);
+      walkIRNodes(fn.body, out);
+      break;
+    }
+    case "struct": {
+      if (!("fields" in node)) {
+        collectTypesFromIRType(node as { kind: "struct"; name: string }, out);
+        break;
+      }
+      const s = node as {
+        fields: { type: IRType; defaultValue?: IRNode }[];
+        inheritedFields?: { type: IRType; defaultValue?: IRNode }[];
+        methods: IRFunction[];
+      };
+      for (const f of [...(s.inheritedFields ?? []), ...s.fields]) {
+        collectTypesFromIRType(f.type, out);
+        if (f.defaultValue) collectTypesFromIRNode(f.defaultValue, out);
+      }
+      for (const m of s.methods) collectTypesFromIRNode(m, out);
+      break;
+    }
+    case "typeAlias":
+      collectTypesFromIRType((node as { type: IRType }).type, out);
+      break;
+    case "enum": {
+      if (!("members" in node)) {
+        collectTypesFromIRType(node as { kind: "enum"; name: string }, out);
+        break;
+      }
+      for (const m of (node as { members: { value?: IRNode }[] }).members) {
+        if (m.value) collectTypesFromIRNode(m.value, out);
+      }
+      break;
+    }
+    case "return":
+      if ((node as { value?: IRNode }).value) {
+        collectTypesFromIRNode((node as { value: IRNode }).value, out);
+      }
+      break;
+    case "if": {
+      const s = node as {
+        condition: IRNode;
+        thenBody: IRNode[];
+        elseBody?: IRNode[];
+      };
+      collectTypesFromIRNode(s.condition, out);
+      walkIRNodes(s.thenBody, out);
+      walkIRNodes(s.elseBody, out);
+      break;
+    }
+    case "while":
+      collectTypesFromIRNode((node as { condition: IRNode }).condition, out);
+      walkIRNodes((node as { body: IRNode[] }).body, out);
+      break;
+    case "for": {
+      const s = node as {
+        iterable?: IRNode;
+        start?: IRNode;
+        end?: IRNode;
+        body: IRNode[];
+      };
+      if (s.iterable) collectTypesFromIRNode(s.iterable, out);
+      if (s.start) collectTypesFromIRNode(s.start, out);
+      if (s.end) collectTypesFromIRNode(s.end, out);
+      walkIRNodes(s.body, out);
+      break;
+    }
+    case "block":
+      walkIRNodes((node as { body: IRNode[] }).body, out);
+      break;
+    case "expressionStatement":
+      collectTypesFromIRNode((node as { expression: IRNode }).expression, out);
+      break;
+    case "assignment": {
+      const s = node as { target: IRNode; value: IRNode };
+      collectTypesFromIRNode(s.target, out);
+      collectTypesFromIRNode(s.value, out);
+      break;
+    }
+    case "binary": {
+      const s = node as { left: IRNode; right: IRNode; resultType: IRType };
+      collectTypesFromIRType(s.resultType, out);
+      collectTypesFromIRNode(s.left, out);
+      collectTypesFromIRNode(s.right, out);
+      break;
+    }
+    case "unary":
+      collectTypesFromIRNode((node as { operand: IRNode }).operand, out);
+      break;
+    case "call": {
+      const s = node as {
+        callee: IRNode;
+        args: IRNode[];
+        resultType: IRType;
+        paramTypes?: IRType[];
+      };
+      collectTypesFromIRType(s.resultType, out);
+      if (s.paramTypes) {
+        for (const t of s.paramTypes) collectTypesFromIRType(t, out);
+      }
+      collectTypesFromIRNode(s.callee, out);
+      for (const a of s.args) collectTypesFromIRNode(a, out);
+      break;
+    }
+    case "member": {
+      const s = node as {
+        object: IRNode;
+        objectType: IRType;
+        type?: IRType;
+      };
+      collectTypesFromIRType(s.objectType, out);
+      if (s.type) collectTypesFromIRType(s.type, out);
+      collectTypesFromIRNode(s.object, out);
+      break;
+    }
+    case "index": {
+      const s = node as { object: IRNode; index: IRNode };
+      collectTypesFromIRNode(s.object, out);
+      collectTypesFromIRNode(s.index, out);
+      break;
+    }
+    case "literal":
+      collectTypesFromIRType((node as { type: IRType }).type, out);
+      break;
+    case "identifier":
+      collectTypesFromIRType((node as { type: IRType }).type, out);
+      break;
+    case "arrayLiteral": {
+      const s = node as { elements: IRNode[]; elementType: IRType };
+      collectTypesFromIRType(s.elementType, out);
+      for (const e of s.elements) collectTypesFromIRNode(e, out);
+      break;
+    }
+    case "objectLiteral": {
+      const s = node as {
+        properties: { value: IRNode; targetType?: IRType }[];
+        typeName?: string;
+      };
+      if (s.typeName) out.add(s.typeName);
+      for (const p of s.properties) {
+        if (p.targetType) collectTypesFromIRType(p.targetType, out);
+        collectTypesFromIRNode(p.value, out);
+      }
+      break;
+    }
+    case "templateLiteral":
+      for (const part of (node as { parts: (string | IRNode)[] }).parts) {
+        if (typeof part !== "string") collectTypesFromIRNode(part, out);
+      }
+      break;
+    case "consoleLog":
+      for (const a of (node as { args: IRNode[] }).args) {
+        collectTypesFromIRNode(a, out);
+      }
+      break;
+    case "tryCatch": {
+      const s = node as {
+        tryBody: IRNode[];
+        catchBody: IRNode[];
+        finallyBody?: IRNode[];
+      };
+      walkIRNodes(s.tryBody, out);
+      walkIRNodes(s.catchBody, out);
+      walkIRNodes(s.finallyBody, out);
+      break;
+    }
+    case "switch": {
+      const s = node as {
+        discriminant: IRNode;
+        cases: { test: IRNode | null; body: IRNode[] }[];
+      };
+      collectTypesFromIRNode(s.discriminant, out);
+      for (const c of s.cases) {
+        if (c.test) collectTypesFromIRNode(c.test, out);
+        walkIRNodes(c.body, out);
+      }
+      break;
+    }
+    case "optionalChain":
+      collectTypesFromIRNode((node as { object: IRNode }).object, out);
+      break;
+    case "nullishCoalesce": {
+      const s = node as { left: IRNode; right: IRNode };
+      collectTypesFromIRNode(s.left, out);
+      collectTypesFromIRNode(s.right, out);
+      break;
+    }
+    case "arrowFunction": {
+      const s = node as {
+        params: { type: IRType }[];
+        returnType: IRType;
+        body: IRNode[];
+      };
+      for (const p of s.params) collectTypesFromIRType(p.type, out);
+      collectTypesFromIRType(s.returnType, out);
+      walkIRNodes(s.body, out);
+      break;
+    }
+    case "superCall": {
+      const s = node as { args: IRNode[]; resultType?: IRType };
+      if (s.resultType) collectTypesFromIRType(s.resultType, out);
+      for (const a of s.args) collectTypesFromIRNode(a, out);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+export function collectReferencedStructs(module: IRModule): Set<string> {
+  const refs = new Set<string>();
+  for (const node of module.body) collectTypesFromIRNode(node, refs);
+  for (const fn of module.hoistedFunctions) collectTypesFromIRNode(fn, refs);
+  for (const node of module.scriptBody) collectTypesFromIRNode(node, refs);
+  return refs;
 }
 
 export function isIntegerTyped(node: IRNode): boolean {

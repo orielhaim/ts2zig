@@ -1,81 +1,40 @@
-import { BankAccount, factorial, double, isRich, type Person } from "./models";
-
-import { map, filter } from "./utils";
-
-function getBalance(account: BankAccount): number {
-  return account.getBalance();
-}
+import { Counter, Point } from "./classes";
+import { processEntities } from "./polymorphism";
+import { createEntity } from "./factories";
+import { World } from "./runtime_graph";
 
 function main(): void {
-  const people: Person[] = [
-    {
-      id: 101,
-      name: "Alice",
-    },
-    {
-      id: 102,
-      name: "Bob",
-    },
-    {
-      id: 103,
-      name: "Charlie",
-    },
-  ];
+  const counter = new Counter();
 
-  const accounts: BankAccount[] = [];
+  counter.increment();
+  counter.increment();
 
-  for (const person of people) {
-    const account = BankAccount.create(person, person.id * 10);
+  const p = new Point(3, 4);
 
-    account.deposit(50);
-    account.withdraw(25);
+  console.log("Counter:", counter.get());
+  console.log("Point:", p.length());
 
-    accounts.push(account);
+  const results = processEntities();
+
+  for (const r of results) {
+    console.log(r);
   }
 
-  const balances = map(accounts, getBalance);
+  const world = new World();
 
-  const doubledBalances = map(balances, double);
+  world.add(createEntity("player", "Alice"));
+  world.add(createEntity("enemy", "Zombie"));
 
-  const richBalances = filter(doubledBalances, isRich);
+  const run = world.run();
 
-  const stats = {
-    accountCount: accounts.length,
-    totalBalance: 0,
-  };
-
-  for (const value of doubledBalances) {
-    stats.totalBalance += value;
+  for (const line of run) {
+    console.log(line);
   }
 
-  console.log("Balances:");
+  const found = world.find("Alice");
 
-  for (const value of balances) {
-    console.log(value);
-  }
-
-  console.log("Doubled:");
-
-  for (const value of doubledBalances) {
-    console.log(value);
-  }
-
-  console.log("Rich:");
-
-  for (const value of richBalances) {
-    console.log(value);
-  }
-
-  console.log(`accounts=${stats.accountCount}`);
-
-  console.log(`total=${stats.totalBalance}`);
-
-  console.log(`factorial(6)=${factorial(6)}`);
-
-  if (stats.totalBalance > 5000) {
-    console.log("large bank");
-  } else {
-    console.log("small bank");
+  if (found !== null) {
+    console.log("FOUND:", found.describe());
   }
 }
 
