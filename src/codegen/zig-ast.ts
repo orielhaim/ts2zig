@@ -8,6 +8,12 @@ import type {
 } from "../types";
 import { ZigWriter } from "./writer";
 
+let _tempVarCounter = 0;
+
+export function resetTempCounter(): void {
+  _tempVarCounter = 0;
+}
+
 export function generateNode(
   node: IRNode,
   w: ZigWriter,
@@ -128,9 +134,13 @@ function generateStruct(
   for (const field of node.fields) {
     const fieldType = typeToZig(field.type);
     if (field.defaultValue) {
-      w.writeLine(
-        `${sanitizeName(field.name)}: ${fieldType} = ${generateExpr(field.defaultValue, diagnostics)},`,
-      );
+      if ((field.defaultValue as any).kind === "emptyArrayInit") {
+        w.writeLine(`${sanitizeName(field.name)}: ${fieldType} = .empty,`);
+      } else {
+        w.writeLine(
+          `${sanitizeName(field.name)}: ${fieldType} = ${generateExpr(field.defaultValue, diagnostics)},`,
+        );
+      }
     } else if (field.isOptional || field.type.kind === "optional") {
       w.writeLine(`${sanitizeName(field.name)}: ${fieldType} = null,`);
     } else {
@@ -173,26 +183,53 @@ function generateInitMethod(
   w.writeLine(`pub fn init(${params.join(", ")}) Self {`);
   w.indent();
 
-  w.writeLine("return Self{");
-  w.indent();
+  const initAssignments: Record<string, IRNode> =
+    (initMethod as any).initAssignments ?? {};
+
+  const fieldsToEmit: { name: string; value: string }[] = [];
 
   for (const field of struct.fields) {
+    if (initAssignments[field.name]) {
+      fieldsToEmit.push({
+        name: field.name,
+        value: generateExpr(initAssignments[field.name], diagnostics),
+      });
+      continue;
+    }
+
     const matchingParam = initMethod.params.find((p) => p.name === field.name);
     if (matchingParam) {
-      w.writeLine(
-        `.${sanitizeName(field.name)} = ${sanitizeName(field.name)},`,
-      );
-    } else if (field.defaultValue) {
-      w.writeLine(
-        `.${sanitizeName(field.name)} = ${generateExpr(field.defaultValue, diagnostics)},`,
-      );
-    } else if (field.isOptional || field.type.kind === "optional") {
-      w.writeLine(`.${sanitizeName(field.name)} = null,`);
+      fieldsToEmit.push({
+        name: field.name,
+        value: sanitizeName(field.name),
+      });
+      continue;
+    }
+
+    if (
+      !field.defaultValue &&
+      !field.isOptional &&
+      field.type.kind !== "optional"
+    ) {
+      fieldsToEmit.push({
+        name: field.name,
+        value: "undefined",
+      });
     }
   }
 
-  w.dedent();
-  w.writeLine("};");
+  if (fieldsToEmit.length === 0) {
+    w.writeLine("return .{};");
+  } else {
+    w.writeLine("return Self{");
+    w.indent();
+    for (const f of fieldsToEmit) {
+      w.writeLine(`.${sanitizeName(f.name)} = ${f.value},`);
+    }
+    w.dedent();
+    w.writeLine("};");
+  }
+
   w.dedent();
   w.writeLine("}");
 }
@@ -375,6 +412,7 @@ function generateConsoleLog(
 
   const formatParts: string[] = [];
   const argParts: string[] = [];
+  const preStatements: string[] = [];
 
   for (const arg of node.args) {
     if (arg.kind === "literal" && typeof arg.value === "string") {
@@ -392,7 +430,6 @@ function generateConsoleLog(
       formatParts.push("{}");
       argParts.push(arg.value ? "true" : "false");
     } else if (arg.kind === "templateLiteral") {
-      // Inline template literal
       for (const part of arg.parts) {
         if (typeof part === "string") {
           formatParts.push(escapeZigString(part));
@@ -403,10 +440,23 @@ function generateConsoleLog(
         }
       }
     } else {
+      const expr = generateExpr(arg, diagnostics);
       const exprType = getNodeType(arg);
-      formatParts.push(formatSpecForType(exprType));
-      argParts.push(generateExpr(arg, diagnostics));
+
+      if (expr.startsWith("try ")) {
+        const tempName = `__log_tmp_${_tempVarCounter++}`;
+        preStatements.push(`const ${tempName} = ${expr};`);
+        formatParts.push(formatSpecForType(exprType));
+        argParts.push(tempName);
+      } else {
+        formatParts.push(formatSpecForType(exprType));
+        argParts.push(expr);
+      }
     }
+  }
+
+  for (const stmt of preStatements) {
+    w.writeLine(stmt);
   }
 
   const format = formatParts.join(" ") + "\\n";
@@ -499,6 +549,20 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
         return `_rt.concat(allocator, ${left}, ${right})`;
       }
 
+      if (isArithmeticOp(node.operator)) {
+        const leftIsFloat = isFloatTyped(node.left);
+        const rightIsFloat = isFloatTyped(node.right);
+        const leftIsInt = isIntegerTyped(node.left);
+        const rightIsInt = isIntegerTyped(node.right);
+
+        if (leftIsFloat && rightIsInt) {
+          return `${left} ${node.operator} @as(f64, @floatFromInt(${right}))`;
+        }
+        if (leftIsInt && rightIsFloat) {
+          return `@as(f64, @floatFromInt(${left})) ${node.operator} ${right}`;
+        }
+      }
+
       return `${left} ${node.operator} ${right}`;
     }
 
@@ -507,18 +571,37 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
 
     case "call": {
       const calleeNode = node.callee;
+
       if (
         calleeNode.kind === "member" &&
         calleeNode.property === "append" &&
-        calleeNode.objectType.kind === "array"
+        calleeNode.objectType?.kind === "array"
       ) {
         const obj = generateExpr(calleeNode.object, diagnostics);
         const args = node.args.map((a: IRNode) => generateExpr(a, diagnostics));
         return `try ${obj}.append(allocator, ${args.join(", ")})`;
       }
+
       const callee = generateExpr(calleeNode, diagnostics);
-      const args = node.args.map((a: IRNode) => generateExpr(a, diagnostics));
-      return `${callee}(${args.join(", ")})`;
+      const userArgs = node.args.map((a: IRNode) =>
+        generateExpr(a, diagnostics),
+      );
+
+      const fullArgs: string[] = [];
+
+      if (node.calleeNeedsAllocator) {
+        fullArgs.push("allocator");
+      }
+
+      fullArgs.push(...userArgs);
+
+      const callStr = `${callee}(${fullArgs.join(", ")})`;
+
+      if (node.calleeReturnsError) {
+        return `try ${callStr}`;
+      }
+
+      return callStr;
     }
 
     case "member":
@@ -710,7 +793,35 @@ function getNodeType(node: IRNode): IRType {
     if (typeof (node as any).value === "boolean")
       return { kind: "primitive", name: "bool" };
   }
+
   if (node.kind === "templateLiteral") return { kind: "string" };
+
+  if (node.kind === "nullishCoalesce") {
+    return getNodeType((node as any).right);
+  }
+
+  if (node.kind === "call") {
+    const rt = (node as any).resultType as IRType | undefined;
+    if (rt) {
+      if (rt.kind === "errorUnion") return rt.okType;
+      return rt;
+    }
+  }
+
+  if (node.kind === "member") {
+    const prop = (node as any).property as string;
+    if (prop === "len") return { kind: "primitive", name: "usize" };
+
+    const objectType = (node as any).objectType as IRType | undefined;
+    if (objectType) {
+    }
+  }
+
+  if (node.kind === "identifier") {
+    const t = (node as any).type as IRType | undefined;
+    if (t) return t;
+  }
+
   return { kind: "unknown" };
 }
 
@@ -731,7 +842,48 @@ function formatSpecForType(type: IRType): string {
         default:
           return "{}";
       }
+    case "optional":
+      return "{?}";
+    case "errorUnion":
+      return formatSpecForType(type.okType);
+    case "array":
+      return "{any}";
     default:
-      return "{}";
+      return "{any}";
   }
+}
+
+function isArithmeticOp(op: string): boolean {
+  return op === "+" || op === "-" || op === "*" || op === "/" || op === "%";
+}
+
+function isFloatTyped(node: IRNode): boolean {
+  if (node.kind === "literal" && typeof (node as any).value === "number")
+    return true;
+  if (node.kind === "identifier") {
+    const t = (node as any).type as IRType | undefined;
+    if (t?.kind === "primitive" && (t.name === "f64" || t.name === "i64"))
+      return true;
+  }
+  if (node.kind === "binary") {
+    const rt = (node as any).resultType as IRType | undefined;
+    if (rt?.kind === "primitive" && rt.name === "f64") return true;
+  }
+  if (node.kind === "call") {
+    const rt = (node as any).resultType as IRType | undefined;
+    if (rt?.kind === "primitive" && rt.name === "f64") return true;
+  }
+  return false;
+}
+
+function isIntegerTyped(node: IRNode): boolean {
+  if (node.kind === "member" && (node as any).property === "len") {
+    return true;
+  }
+  if (node.kind === "identifier") {
+    const t = (node as any).type as IRType | undefined;
+    if (t?.kind === "primitive" && (t.name === "usize" || t.name === "i64"))
+      return true;
+  }
+  return false;
 }

@@ -1,22 +1,28 @@
 import type { IRModule, Diagnostic } from "../types";
 import { ZigWriter } from "./writer";
-import { generateNode } from "./zig-ast";
+import { generateNode, resetTempCounter } from "./zig-ast";
 
 export function generateZig(
   module: IRModule,
   diagnostics: Diagnostic[],
 ): string {
+  resetTempCounter();
   const w = new ZigWriter();
 
   w.writeLine('const std = @import("std");');
-
   w.writeLine('const _rt = @import("_runtime.zig");');
+
+  const importedNames = new Map<string, string>();
 
   for (const imp of module.imports) {
     const alias = imp.source
       .replace(/\.zig$/, "")
       .replace(/[^a-zA-Z0-9_]/g, "_");
     w.writeLine(`const ${alias} = @import("${imp.source}");`);
+
+    for (const name of imp.names) {
+      importedNames.set(name, alias);
+    }
   }
 
   w.writeLine("");
@@ -24,6 +30,13 @@ export function generateZig(
   if (module.errors.length > 0) {
     const errors = module.errors.join(", ");
     w.writeLine(`const AppError = error{ ${errors} };`);
+    w.writeLine("");
+  }
+
+  for (const [name, alias] of importedNames) {
+    w.writeLine(`const ${name} = ${alias}.${name};`);
+  }
+  if (importedNames.size > 0) {
     w.writeLine("");
   }
 
@@ -53,9 +66,11 @@ function generateExecutableEntry(
 ): void {
   w.writeLine("pub fn main() !void {");
   w.indent();
-  w.writeLine("var gpa = std.heap.DebugAllocator(.{}){};");
-  w.writeLine("defer _ = gpa.deinit();");
-  w.writeLine("const allocator = gpa.allocator();");
+  w.writeLine(
+    "var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);",
+  );
+  w.writeLine("defer arena.deinit();");
+  w.writeLine("const allocator = arena.allocator();");
 
   if (module.scriptBody.length > 0) {
     w.writeLine("");
@@ -81,9 +96,11 @@ function generateScriptEntry(
   w.indent();
 
   if (needsAllocator) {
-    w.writeLine("var gpa = std.heap.DebugAllocator(.{}){};");
-    w.writeLine("defer _ = gpa.deinit();");
-    w.writeLine("const allocator = gpa.allocator();");
+    w.writeLine(
+      "var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);",
+    );
+    w.writeLine("defer arena.deinit();");
+    w.writeLine("const allocator = arena.allocator();");
   }
 
   w.writeLine("");

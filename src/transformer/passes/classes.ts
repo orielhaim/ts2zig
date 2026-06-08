@@ -23,7 +23,7 @@ export function transformClass(
   const name = node.name?.text ?? "AnonymousClass";
   const fields: IRField[] = [];
   const methods: IRFunction[] = [];
-  let hasInit = false;
+  let hasExplicitConstructor = false;
 
   // Inheritance warning
   if (node.heritageClauses) {
@@ -39,7 +39,6 @@ export function transformClass(
   }
 
   for (const member of node.members) {
-    // Properties
     if (ts.isPropertyDeclaration(member)) {
       const fieldName = member.name.getText(ctx.sourceFile);
       let fieldType: IRType;
@@ -59,20 +58,32 @@ export function transformClass(
 
       const isOptional = !!member.questionToken;
 
+      let defaultValue: IRNode | undefined;
+      if (member.initializer) {
+        if (
+          ts.isArrayLiteralExpression(member.initializer) &&
+          member.initializer.elements.length === 0
+        ) {
+          defaultValue = { kind: "emptyArrayInit" } as any;
+        } else {
+          defaultValue = transformExpression(member.initializer, ctx);
+        }
+      }
+
       fields.push({
         name: fieldName,
         type: isOptional ? { kind: "optional", inner: fieldType } : fieldType,
-        defaultValue: member.initializer
-          ? transformExpression(member.initializer, ctx)
-          : undefined,
+        defaultValue,
         isPublic: true,
         isOptional,
       });
     }
+  }
 
+  for (const member of node.members) {
     // Constructor
     if (ts.isConstructorDeclaration(member)) {
-      hasInit = true;
+      hasExplicitConstructor = true;
       const params: IRParam[] = [];
 
       for (const param of member.parameters) {
@@ -87,7 +98,6 @@ export function transformClass(
           isOptional: !!param.questionToken,
         });
 
-        // If parameter has property modifier, add as field
         const modifiers = ts.getModifiers(param);
         if (
           modifiers?.some(
@@ -110,11 +120,19 @@ export function transformClass(
         }
       }
 
-      const initBody: IRNode[] = [];
+      // Analyze the constructor body: extract `this.x = ...` assignments
+      const initAssignments = new Map<string, IRNode>();
+      const otherStatements: IRNode[] = [];
+
       if (member.body) {
         for (const stmt of member.body.statements) {
-          const result = transformStatement(stmt, ctx);
-          if (result) initBody.push(result);
+          const thisAssignment = extractThisAssignment(stmt, ctx);
+          if (thisAssignment) {
+            initAssignments.set(thisAssignment.field, thisAssignment.value);
+          } else {
+            const result = transformStatement(stmt, ctx);
+            if (result) otherStatements.push(result);
+          }
         }
       }
 
@@ -123,13 +141,14 @@ export function transformClass(
         name: "init",
         params,
         returnType: { kind: "struct", name },
-        body: initBody,
+        body: otherStatements,
         isPublic: true,
         isMethod: true,
         isStatic: true,
         needsAllocator: false,
         isMain: false,
-      });
+        initAssignments: Object.fromEntries(initAssignments),
+      } as any);
     }
 
     // Methods
@@ -169,7 +188,7 @@ export function transformClass(
         }
       }
 
-      const fnNeedsAllocator = needsAllocator(returnType);
+      const fnNeedsAllocator = methodBodyAllocates(member.body, ctx);
 
       const body: IRNode[] = [];
       if (member.body) {
@@ -202,12 +221,92 @@ export function transformClass(
     }
   }
 
+  if (!hasExplicitConstructor) {
+    methods.unshift({
+      kind: "function",
+      name: "init",
+      params: [],
+      returnType: { kind: "struct", name },
+      body: [],
+      isPublic: true,
+      isMethod: true,
+      isStatic: true,
+      needsAllocator: false,
+      isMain: false,
+    });
+  }
+
   return {
     kind: "struct",
     name,
     fields,
     methods,
     isPublic: ctx.exports.has(name),
-    hasInit,
+    hasInit: true,
   };
+}
+
+function extractThisAssignment(
+  stmt: ts.Statement,
+  ctx: TransformContext,
+): { field: string; value: IRNode } | null {
+  if (!ts.isExpressionStatement(stmt)) return null;
+  const expr = stmt.expression;
+  if (!ts.isBinaryExpression(expr)) return null;
+  if (expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null;
+
+  const left = expr.left;
+  if (!ts.isPropertyAccessExpression(left)) return null;
+  if (left.expression.kind !== ts.SyntaxKind.ThisKeyword) return null;
+
+  const fieldName = left.name.text;
+  const value = transformExpression(expr.right, ctx);
+
+  return { field: fieldName, value };
+}
+
+function methodBodyAllocates(
+  body: ts.Block | undefined,
+  ctx: TransformContext,
+): boolean {
+  if (!body) return false;
+  let allocates = false;
+
+  function visit(node: ts.Node) {
+    if (allocates) return;
+
+    if (ts.isArrayLiteralExpression(node)) {
+      allocates = true;
+      return;
+    }
+
+    if (ts.isTemplateExpression(node)) {
+      allocates = true;
+      return;
+    }
+
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ) {
+      const leftType = ctx.checker.getTypeAtLocation(node.left);
+      if (
+        leftType.flags & ts.TypeFlags.String ||
+        leftType.flags & ts.TypeFlags.StringLiteral
+      ) {
+        allocates = true;
+        return;
+      }
+    }
+
+    if (ts.isNewExpression(node)) {
+      allocates = true;
+      return;
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(body, visit);
+  return allocates;
 }

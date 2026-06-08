@@ -58,14 +58,12 @@ export function transformFunction(
       message: `async function "${name}" will be compiled as synchronous.`,
       file: ctx.sourceFile.fileName,
     });
-    // Strip Promise<T> → T
     if (returnType.kind === "struct" && returnType.name === "Promise") {
       returnType = { kind: "primitive", name: "void" };
     }
   }
 
-  const fnNeedsAllocator =
-    needsAllocator(returnType) || bodyNeedsAllocator(node.body, ctx);
+  const fnNeedsAllocator = bodyAllocates(node.body, ctx);
   const isMain = name === "main";
   const isPublic = ctx.exports.has(name) || isMain;
 
@@ -77,7 +75,6 @@ export function transformFunction(
     }
   }
 
-  // Check for throws in the body → error union return type
   if (bodyHasThrow(node.body)) {
     returnType = {
       kind: "errorUnion",
@@ -105,7 +102,7 @@ export function transformFunction(
   };
 }
 
-function bodyNeedsAllocator(
+function bodyAllocates(
   body: ts.Block | undefined,
   ctx: TransformContext,
 ): boolean {
@@ -113,12 +110,12 @@ function bodyNeedsAllocator(
   let needs = false;
 
   function visit(node: ts.Node) {
-    // Array literal creation
+    if (needs) return;
+
     if (ts.isArrayLiteralExpression(node)) {
       needs = true;
       return;
     }
-    // String concatenation
     if (
       ts.isBinaryExpression(node) &&
       node.operatorToken.kind === ts.SyntaxKind.PlusToken
@@ -132,13 +129,15 @@ function bodyNeedsAllocator(
         return;
       }
     }
-    // Template literals
     if (ts.isTemplateExpression(node)) {
       needs = true;
       return;
     }
-    // Object creation
     if (ts.isObjectLiteralExpression(node)) {
+      needs = true;
+      return;
+    }
+    if (ts.isNewExpression(node)) {
       needs = true;
       return;
     }
@@ -164,6 +163,3 @@ function bodyHasThrow(body: ts.Block | undefined): boolean {
   ts.forEachChild(body, visit);
   return has;
 }
-
-// Re-export for use in statements
-export { transformExpression } from "./expressions";

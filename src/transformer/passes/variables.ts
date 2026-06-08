@@ -23,7 +23,7 @@ export function transformVariable(
     type = resolveType(tsType, ctx.checker);
   }
 
-  const isConst = !!(
+  const tsIsConst = !!(
     stmt?.declarationList.flags! & ts.NodeFlags.Const ||
     (!stmt &&
       decl.parent &&
@@ -31,8 +31,11 @@ export function transformVariable(
   );
 
   const value = decl.initializer
-    ? transformExpression(decl.initializer, ctx)
+    ? transformExpression(decl.initializer, ctx, type)
     : undefined;
+
+  const needsMutable = tsIsConst && isMutableClassInstance(decl, ctx);
+  const isConst = tsIsConst && !needsMutable;
 
   return {
     kind: "variable",
@@ -42,4 +45,32 @@ export function transformVariable(
     isConst,
     needsDefer: needsAllocator(type),
   };
+}
+
+function isMutableClassInstance(
+  decl: ts.VariableDeclaration,
+  ctx: TransformContext,
+): boolean {
+  if (!decl.initializer || !ts.isNewExpression(decl.initializer)) {
+    return false;
+  }
+
+  const tsType = ctx.checker.getTypeAtLocation(decl.initializer);
+  const symbol = tsType.getSymbol();
+  if (!symbol || !symbol.declarations) return false;
+
+  for (const d of symbol.declarations) {
+    if (ts.isClassDeclaration(d)) {
+      for (const member of d.members) {
+        if (
+          ts.isMethodDeclaration(member) &&
+          !member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
 }

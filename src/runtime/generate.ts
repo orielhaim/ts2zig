@@ -23,7 +23,7 @@ pub fn boolToString(value: bool) []const u8 {
 
 /// Check if a string contains a substring.
 pub fn stringIncludes(haystack: []const u8, needle: []const u8) bool {
-    return std.mem.indexOf(u8, haystack, needle) != null;
+    return std.mem.find(u8, haystack, needle) != null;
 }
 
 /// Get a substring (slice).

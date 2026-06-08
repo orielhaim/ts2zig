@@ -179,6 +179,8 @@ export interface IRCallExpr {
   callee: IRNode;
   args: IRNode[];
   resultType: IRType;
+  calleeNeedsAllocator?: boolean;
+  calleeReturnsError?: boolean;
 }
 
 export interface IRMemberExpr {
@@ -186,6 +188,7 @@ export interface IRMemberExpr {
   object: IRNode;
   property: string;
   objectType: IRType;
+  type?: IRType;
 }
 
 export interface IRIndexExpr {

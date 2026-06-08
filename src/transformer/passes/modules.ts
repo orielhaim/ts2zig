@@ -12,7 +12,6 @@ export function transformImport(
 
   let source = moduleSpecifier.text;
 
-  // Skip node_modules imports for now
   if (!source.startsWith(".") && !source.startsWith("/")) {
     ctx.diagnostics.push({
       severity: "warning",
@@ -22,24 +21,22 @@ export function transformImport(
     return null;
   }
 
-  // Normalize: ./foo → foo.zig
   source = source.replace(/^\.\//, "").replace(/\.ts$/, "") + ".zig";
 
   const names: string[] = [];
   let isDefault = false;
 
   if (node.importClause) {
-    // Default import
     if (node.importClause.name) {
       names.push(node.importClause.name.text);
       isDefault = true;
     }
 
-    // Named imports { a, b }
     if (node.importClause.namedBindings) {
       if (ts.isNamedImports(node.importClause.namedBindings)) {
         for (const el of node.importClause.namedBindings.elements) {
-          names.push(el.name.text);
+          const localName = el.name.text;
+          names.push(localName);
         }
       } else if (ts.isNamespaceImport(node.importClause.namedBindings)) {
         names.push(node.importClause.namedBindings.name.text);
