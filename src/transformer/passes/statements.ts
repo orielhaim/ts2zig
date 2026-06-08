@@ -203,21 +203,50 @@ function transformTraditionalFor(
     init.declarations.length === 1 &&
     cond &&
     ts.isBinaryExpression(cond) &&
-    (cond.operatorToken.kind === ts.SyntaxKind.LessThanToken ||
-      cond.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken)
+    ts.isIdentifier(cond.left)
   ) {
     const decl = init.declarations[0];
     const itemName = decl.name.getText(ctx.sourceFile);
-    const end = transformExpression(cond.right, ctx);
-    const body = transformStatementToBody(node.statement, ctx);
+    if (cond.left.text !== itemName) {
+      // fall through to while
+    } else {
+      const body = transformStatementToBody(node.statement, ctx);
+      const startIsZero =
+        decl.initializer &&
+        ts.isNumericLiteral(decl.initializer) &&
+        decl.initializer.text === "0";
+      const isLessThan =
+        cond.operatorToken.kind === ts.SyntaxKind.LessThanToken;
 
-    return {
-      kind: "for",
-      variant: "range",
-      itemName,
-      end,
-      body,
-    };
+      if (startIsZero && isLessThan) {
+        return {
+          kind: "for",
+          variant: "range",
+          itemName,
+          end: transformExpression(cond.right, ctx),
+          body,
+        };
+      }
+
+      const loopBody = [...body];
+      if (incr) {
+        loopBody.push({
+          kind: "expressionStatement",
+          expression: transformExpression(incr, ctx),
+        });
+      }
+
+      return {
+        kind: "for",
+        variant: "traditional",
+        itemName,
+        start: decl.initializer
+          ? transformExpression(decl.initializer, ctx)
+          : undefined,
+        condition: transformExpression(cond, ctx),
+        body: loopBody,
+      };
+    }
   }
 
   // Fallback: use while loop

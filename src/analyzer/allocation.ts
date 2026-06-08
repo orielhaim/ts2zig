@@ -139,6 +139,15 @@ export function isThisPropertyAccess(node: ts.Node): boolean {
   );
 }
 
+export function isThisDerivedPropertyAccess(node: ts.Node): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  let cur: ts.Expression = node.expression;
+  while (ts.isPropertyAccessExpression(cur)) {
+    cur = cur.expression;
+  }
+  return cur.kind === ts.SyntaxKind.ThisKeyword;
+}
+
 export function bodyMutatesThis(body: ts.Block | undefined): boolean {
   if (!body) return false;
   let mutates = false;
@@ -160,7 +169,7 @@ export function isThisFieldMutation(node: ts.Node): boolean {
   if (
     ts.isBinaryExpression(node) &&
     isAssignmentOperatorKind(node.operatorToken.kind) &&
-    isThisPropertyAccess(node.left)
+    isThisDerivedPropertyAccess(node.left)
   ) {
     return true;
   }
@@ -169,7 +178,7 @@ export function isThisFieldMutation(node: ts.Node): boolean {
     (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) &&
     (node.operator === ts.SyntaxKind.PlusPlusToken ||
       node.operator === ts.SyntaxKind.MinusMinusToken) &&
-    isThisPropertyAccess(node.operand)
+    isThisDerivedPropertyAccess(node.operand)
   ) {
     return true;
   }

@@ -18,9 +18,11 @@ type StructInfo = {
   baseInstantiatedType?: string;
 };
 let structHierarchy = new Map<string, StructInfo>();
+let enumVariantCounts = new Map<string, number>();
 
 export function initStructHierarchy(modules: IRModule | IRModule[]): void {
   structHierarchy = new Map();
+  enumVariantCounts = new Map();
   const list = Array.isArray(modules) ? modules : [modules];
   for (const module of list) {
     for (const node of module.body) {
@@ -32,9 +34,15 @@ export function initStructHierarchy(modules: IRModule | IRModule[]): void {
           typeParameters: node.typeParameters,
           baseInstantiatedType: node.baseInstantiatedType,
         });
+      } else if (node.kind === "enum") {
+        enumVariantCounts.set(node.name, node.members.length);
       }
     }
   }
+}
+
+export function getEnumVariantCount(name: string): number | undefined {
+  return enumVariantCounts.get(name);
 }
 
 export function hierarchyRootName(className: string): string {
@@ -83,12 +91,30 @@ export function castSelfToOpaque(
   return `@as(${opaque}, @ptrCast(${selfExpr}))`;
 }
 
+function isDescendantOf(derived: string, base: string): boolean {
+  if (derived === base) return false;
+  let cur: string | undefined = derived;
+  while (cur) {
+    if (cur === base) return true;
+    cur = structHierarchy.get(cur)?.baseClass;
+  }
+  return false;
+}
+
+export function hierarchyUsesPointerStorage(className: string): boolean {
+  for (const [name, info] of structHierarchy) {
+    if (isDescendantOf(name, className) && info.ownFieldCount > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function canUpcastToBase(derived: string, base: string): boolean {
   let cur: string | undefined = derived;
   while (cur && cur !== base) {
     const info = structHierarchy.get(cur);
-    if (!info) return false;
-    if (info.ownFieldCount > 0) return false;
+    if (!info?.baseClass) return false;
     cur = info.baseClass;
   }
   return cur === base;
@@ -199,6 +225,9 @@ export function typeToZig(type: IRType, gm: GenericMap | null): string {
     case "instantiatedStruct":
       return `${type.base}(${type.typeArg})`;
     case "struct":
+      if (hierarchyUsesPointerStorage(type.name)) {
+        return `*const ${type.name}`;
+      }
       return type.name;
     case "errorUnion":
       if (type.errorSet)
@@ -360,10 +389,23 @@ export function coerce(
 
   if (
     from.kind === "struct" &&
+    to.kind === "pointer" &&
+    to.isConst &&
+    to.inner.kind === "struct" &&
+    canUpcastToBase(from.name, to.inner.name)
+  ) {
+    return `try _rt.heapUpcast(${from.name}, ${to.inner.name}, allocator, ${expr})`;
+  }
+
+  if (
+    from.kind === "struct" &&
     to.kind === "struct" &&
     from.name !== to.name &&
     canUpcastToBase(from.name, to.name)
   ) {
+    if (hierarchyUsesPointerStorage(to.name)) {
+      return `try _rt.heapUpcast(${from.name}, ${to.name}, allocator, ${expr})`;
+    }
     return upcastToBaseExpr(expr, from.name, to.name);
   }
 
@@ -490,6 +532,8 @@ export function formatSpecForType(type: IRType): string {
       return formatSpecForType(type.okType);
     case "array":
       return "{any}";
+    case "tuple":
+      return type.elements.map((e) => formatSpecForType(e)).join(" ");
     default:
       return "{any}";
   }

@@ -67,17 +67,12 @@ function needsMutableBinding(
   ctx: TransformContext,
 ): boolean {
   const name = decl.name.getText(ctx.sourceFile);
+  const scope = findContainingScope(decl);
 
-  const tsType = ctx.checker.getTypeAtLocation(decl);
-  const hasInstanceMethods = typeHasInstanceMethods(tsType, ctx);
-  if (
-    hasInstanceMethods &&
-    isUsedMutablyInScope(name, findContainingScope(decl), ctx)
-  ) {
+  if (scope && isUsedMutablyInScope(name, scope, ctx)) {
     return true;
   }
 
-  const scope = findContainingScope(decl);
   if (scope && hasFieldAssignmentInScope(name, scope)) {
     return true;
   }
@@ -150,26 +145,6 @@ function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
   );
 }
 
-function typeHasInstanceMethods(type: ts.Type, ctx: TransformContext): boolean {
-  const symbol = type.getSymbol();
-  if (!symbol || !symbol.declarations) return false;
-
-  for (const d of symbol.declarations) {
-    if (ts.isClassDeclaration(d)) {
-      for (const member of d.members) {
-        if (
-          ts.isMethodDeclaration(member) &&
-          !member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword)
-        ) {
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
-}
-
 function isUsedMutablyInScope(
   varName: string,
   scope: ts.Node | null,
@@ -185,6 +160,10 @@ function isUsedMutablyInScope(
       const obj = n.expression.expression;
       if (ts.isIdentifier(obj) && obj.text === varName) {
         const methodName = n.expression.name.text;
+        if (methodName === "push" || methodName === "append") {
+          isMutable = true;
+          return;
+        }
         const objType = ctx.checker.getTypeAtLocation(obj);
         const methodSymbol = objType.getProperty(methodName);
         if (methodSymbol && methodSymbol.declarations) {

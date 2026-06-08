@@ -21,6 +21,8 @@ import {
   coerce,
   vtableTypeName,
   castSelfToOpaque,
+  getEnumVariantCount,
+  hierarchyUsesPointerStorage,
 } from "./utils";
 
 export function generateNode(
@@ -58,6 +60,10 @@ export function generateNode(
       break;
     case "expressionStatement": {
       const expr = node.expression;
+      if (expr?.kind === "assignment") {
+        generateAssignment(expr, w, diagnostics);
+        break;
+      }
       if (needsResultDiscard(expr)) {
         w.writeLine(`_ = ${generateExpr(expr, diagnostics)};`);
       } else {
@@ -141,12 +147,17 @@ export function generateFunction(
     params.push("allocator: std.mem.Allocator");
   }
 
+  const paramNames = new Set(node.params.map((p) => p.name));
+  const reassignedParams = findReassignedParamNames(node.body, paramNames);
+
   for (const p of node.params) {
     const paramType = p.type;
+    const zname = sanitizeName(p.name);
+    const sigName = reassignedParams.has(p.name) ? `${zname}_in` : zname;
     if (node.isGeneric || (containsGenericOrUnknown(paramType) && !gm)) {
-      params.push(`${sanitizeName(p.name)}: anytype`);
+      params.push(`${sigName}: anytype`);
     } else {
-      params.push(`${sanitizeName(p.name)}: ${typeToZig(p.type, gm)}`);
+      params.push(`${sigName}: ${typeToZig(p.type, gm)}`);
     }
   }
 
@@ -156,6 +167,17 @@ export function generateFunction(
 
   w.writeLine(`${pub}fn ${sanitizeName(name)}(${paramStr}) ${returnTypeStr} {`);
   w.indent();
+
+  for (const p of node.params) {
+    if (reassignedParams.has(p.name)) {
+      const zname = sanitizeName(p.name);
+      w.writeLine(`var ${zname}: ${typeToZig(p.type, gm)} = ${zname}_in;`);
+    }
+  }
+
+  if (node.needsAllocator && !irBodyUsesAllocator(node.body)) {
+    w.writeLine("_ = allocator;");
+  }
 
   const functionReturnType =
     node.returnType.kind === "errorUnion"
@@ -378,6 +400,20 @@ function generateBodyNode(
     case "function":
       generateFunction(node as IRFunction, w, diagnostics, depth);
       break;
+    case "assignment":
+      generateAssignment(node, w, diagnostics);
+      break;
+    case "expressionStatement": {
+      const expr = (node as { expression: IRNode }).expression;
+      if (expr?.kind === "assignment") {
+        generateAssignment(expr, w, diagnostics);
+      } else if (needsResultDiscard(expr)) {
+        w.writeLine(`_ = ${generateExpr(expr, diagnostics)};`);
+      } else {
+        w.writeLine(`${generateExpr(expr, diagnostics)};`);
+      }
+      break;
+    }
     default:
       generateNode(node, w, diagnostics, depth);
       break;
@@ -878,8 +914,10 @@ function generateArrayInit(
   const arrNode = node.value as any;
   const elementType = typeToZig(arrNode.elementType, gm);
 
+  const listKeyword =
+    arrNode.elements.length > 0 || !node.isConst ? "var" : "const";
   w.writeLine(
-    `var ${sanitizeName(node.name)}: std.ArrayList(${elementType}) = .empty;`,
+    `${listKeyword} ${sanitizeName(node.name)}: std.ArrayList(${elementType}) = .empty;`,
   );
   if (node.needsDefer) {
     w.writeLine(`defer ${sanitizeName(node.name)}.deinit(allocator);`);
@@ -998,7 +1036,10 @@ function generateFor(
       endStr = `@as(usize, @intFromFloat(${endRaw}))`;
     }
 
-    w.writeLine(`for (0..${endStr}) |${sanitizeName(node.itemName)}| {`);
+    const rangeCapture = forBodyUsesCapture(node.body, node.itemName)
+      ? sanitizeName(node.itemName)
+      : "_";
+    w.writeLine(`for (0..${endStr}) |${rangeCapture}| {`);
     w.indent();
     for (const child of node.body) {
       generateBodyNode(
@@ -1018,11 +1059,51 @@ function generateFor(
       node.body,
       node.itemName,
     );
-    const capture = needsMutableCapture
-      ? `|*${sanitizeName(node.itemName)}|`
-      : `|${sanitizeName(node.itemName)}|`;
+    const itemCapture = forBodyUsesCapture(node.body, node.itemName)
+      ? sanitizeName(node.itemName)
+      : "_";
+    const iterableElemType = getNodeType(node.iterable);
+    const elemStructName =
+      iterableElemType.kind === "array" &&
+      iterableElemType.elementType.kind === "struct"
+        ? iterableElemType.elementType.name
+        : undefined;
+    const elemIsPointer =
+      elemStructName !== undefined &&
+      hierarchyUsesPointerStorage(elemStructName);
+    const capture =
+      needsMutableCapture && !elemIsPointer
+        ? `|*${itemCapture}|`
+        : `|${itemCapture}|`;
 
     w.writeLine(`for (${iterable}.items) ${capture} {`);
+    w.indent();
+    for (const child of node.body) {
+      generateBodyNode(
+        child,
+        w,
+        diagnostics,
+        depth + 1,
+        gm,
+        functionReturnType,
+      );
+    }
+    w.dedent();
+    w.writeLine("}");
+  } else if (node.variant === "traditional") {
+    const itemType = node.start
+      ? getNodeType(node.start)
+      : ({ kind: "primitive", name: "f64" } as IRType);
+    const typeStr = typeToZig(itemType, gm);
+    if (node.start) {
+      w.writeLine(
+        `var ${sanitizeName(node.itemName)}: ${typeStr} = ${generateExpr(node.start, diagnostics)};`,
+      );
+    }
+    const cond = node.condition
+      ? generateExpr(node.condition, diagnostics)
+      : "true";
+    w.writeLine(`while (${cond}) {`);
     w.indent();
     for (const child of node.body) {
       generateBodyNode(
@@ -1039,9 +1120,101 @@ function generateFor(
   }
 }
 
+function findReassignedParamNames(
+  body: IRNode[],
+  paramNames: Set<string>,
+): Set<string> {
+  const reassigned = new Set<string>();
+  const visit = (node: any): void => {
+    if (!node || typeof node !== "object") return;
+    if (
+      node.kind === "assignment" &&
+      node.target?.kind === "identifier" &&
+      paramNames.has(node.target.name)
+    ) {
+      reassigned.add(node.target.name);
+    }
+    for (const key of Object.keys(node)) {
+      const val = node[key];
+      if (Array.isArray(val)) {
+        for (const item of val) visit(item);
+      } else if (val && typeof val === "object" && val.kind) {
+        visit(val);
+      }
+    }
+  };
+  for (const n of body) visit(n);
+  return reassigned;
+}
+
 function forBodyNeedsMutableCapture(body: IRNode[], itemName: string): boolean {
   for (const node of body) {
     if (nodeUsesMutably(node, itemName)) return true;
+  }
+  return false;
+}
+
+function forBodyUsesCapture(body: IRNode[], itemName: string): boolean {
+  for (const node of body) {
+    if (nodeReferencesIdentifier(node, itemName)) return true;
+  }
+  return false;
+}
+
+function nodeReferencesIdentifier(node: any, name: string): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (node.kind === "identifier" && node.name === name) return true;
+  for (const key of Object.keys(node)) {
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (nodeReferencesIdentifier(item, name)) return true;
+      }
+    } else if (val && typeof val === "object" && val.kind) {
+      if (nodeReferencesIdentifier(val, name)) return true;
+    }
+  }
+  return false;
+}
+
+function irBodyUsesAllocator(nodes: IRNode[]): boolean {
+  for (const node of nodes) {
+    if (nodeNeedsAllocator(node)) return true;
+  }
+  return false;
+}
+
+function nodeNeedsAllocator(node: any): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (node.kind === "call") {
+    if (node.calleeNeedsAllocator) return true;
+    if (node.callee?.kind === "member" && node.callee.property === "append") {
+      return true;
+    }
+  }
+  if (node.kind === "templateLiteral") return true;
+  if (node.kind === "variable" && node.value?.kind === "arrayLiteral") {
+    if (node.value.elements.length > 0) return true;
+    if (node.needsDefer) return true;
+  }
+  if (
+    node.kind === "binary" &&
+    node.operator === "+" &&
+    (node.left?.type?.kind === "string" ||
+      node.right?.type?.kind === "string" ||
+      node.resultType?.kind === "string")
+  ) {
+    return true;
+  }
+  for (const key of Object.keys(node)) {
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (nodeNeedsAllocator(item)) return true;
+      }
+    } else if (val && typeof val === "object" && val.kind) {
+      if (nodeNeedsAllocator(val)) return true;
+    }
   }
   return false;
 }
@@ -1150,7 +1323,17 @@ function generateConsoleLog(
       const expr = generateExpr(arg, diagnostics);
       const exprType = getNodeType(arg);
 
-      if (expr.startsWith("try ")) {
+      if (exprType.kind === "tuple") {
+        const innerFmt: string[] = [];
+        for (let i = 0; i < exprType.elements.length; i++) {
+          const el = exprType.elements[i];
+          innerFmt.push(
+            el.kind === "string" ? '\\"{s}\\"' : formatSpecForType(el),
+          );
+          argParts.push(`${expr}.@"${i}"`);
+        }
+        formatParts.push(`[ ${innerFmt.join(", ")} ]`);
+      } else if (expr.startsWith("try ")) {
         const tempName = `__log_tmp_${incrementTempCounter()}`;
         preStatements.push(`const ${tempName} = ${expr};`);
         formatParts.push(formatSpecForType(exprType));
@@ -1192,6 +1375,20 @@ function generateTryCatch(
   }
 }
 
+function inferEnumNameFromSwitchCases(
+  cases: { test: IRNode | null; body: IRNode[] }[],
+): string | undefined {
+  for (const c of cases) {
+    if (c.test?.kind === "member") {
+      const obj = (c.test as { object: IRNode }).object;
+      if (obj.kind === "identifier") {
+        return (obj as { name: string }).name;
+      }
+    }
+  }
+  return undefined;
+}
+
 function generateSwitch(
   node: any,
   w: ZigWriter,
@@ -1199,10 +1396,54 @@ function generateSwitch(
   depth: number,
 ): void {
   const disc = generateExpr(node.discriminant, diagnostics);
+  const discType = getNodeType(node.discriminant);
+  const isFloatSwitch =
+    discType.kind === "primitive" && discType.name === "f64";
+
+  if (isFloatSwitch) {
+    let opened = false;
+    for (let i = 0; i < node.cases.length; i++) {
+      const c = node.cases[i];
+      if (c.test) {
+        const test = generateExpr(c.test, diagnostics);
+        if (!opened) {
+          w.writeLine(`if (${disc} == ${test}) {`);
+          opened = true;
+        } else {
+          w.writeLine(`} else if (${disc} == ${test}) {`);
+        }
+      } else {
+        w.writeLine(`} else {`);
+      }
+      w.indent();
+      for (const child of c.body) {
+        generateNode(child, w, diagnostics, depth + 1);
+      }
+      w.dedent();
+    }
+    if (opened) {
+      w.writeLine("}");
+    }
+    return;
+  }
+
+  let cases = node.cases as { test: IRNode | null; body: IRNode[] }[];
+  const enumName =
+    discType.kind === "enum"
+      ? discType.name
+      : inferEnumNameFromSwitchCases(cases);
+  if (enumName) {
+    const variantCount = getEnumVariantCount(enumName);
+    const testedCount = cases.filter((c) => c.test).length;
+    if (variantCount !== undefined && testedCount >= variantCount) {
+      cases = cases.filter((c) => c.test);
+    }
+  }
+
   w.writeLine(`switch (${disc}) {`);
   w.indent();
 
-  for (const c of node.cases) {
+  for (const c of cases) {
     if (c.test) {
       const test = generateExpr(c.test, diagnostics);
       w.writeLine(`${test} => {`);

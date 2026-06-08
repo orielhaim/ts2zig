@@ -3,6 +3,18 @@ export function generateRuntime(): string {
   
   /// Runtime helpers for tszig generated code.
   
+  /// Heap-allocate a derived instance and return a base-class pointer (polymorphic storage).
+  pub fn heapUpcast(
+      comptime Derived: type,
+      comptime Base: type,
+      allocator: std.mem.Allocator,
+      value: Derived,
+  ) !*const Base {
+      const ptr = try allocator.create(Derived);
+      ptr.* = value;
+      return @as(*const Base, @ptrCast(@alignCast(ptr)));
+  }
+
   /// Concatenate two strings using an allocator.
   pub fn concat(allocator: std.mem.Allocator, a: []const u8, b: []const u8) []const u8 {
       const result = allocator.alloc(u8, a.len + b.len) catch return "";

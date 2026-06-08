@@ -75,12 +75,23 @@ function buildTypeExportMap(
     const alias = zigModuleAlias(zigPath);
 
     for (const stmt of sourceFile.statements) {
-      if (!ts.isClassDeclaration(stmt) || !stmt.name) continue;
       const isExported = stmt.modifiers?.some(
         (m) => m.kind === ts.SyntaxKind.ExportKeyword,
       );
       if (!isExported) continue;
-      map.set(stmt.name.text, { alias, source: zigPath });
+
+      if (ts.isClassDeclaration(stmt) && stmt.name) {
+        map.set(stmt.name.text, { alias, source: zigPath });
+      } else if (ts.isInterfaceDeclaration(stmt)) {
+        map.set(stmt.name.text, { alias, source: zigPath });
+      } else if (ts.isEnumDeclaration(stmt) && stmt.name) {
+        map.set(stmt.name.text, { alias, source: zigPath });
+      } else if (
+        ts.isTypeAliasDeclaration(stmt) &&
+        ts.isTypeLiteralNode(stmt.type)
+      ) {
+        map.set(stmt.name.text, { alias, source: zigPath });
+      }
     }
   }
 
@@ -168,10 +179,6 @@ export function compile(
       const analysis = analyzeSourceFile(sourceFile, checker, diagnostics);
       const ir = transformToIR(analysis, checker, diagnostics);
       compiledModules.push({ relativePath, zigPath, ir });
-
-      if (analysis.hasMainFunction) {
-        hasEntryPoint = true;
-      }
     } catch (err: any) {
       diagnostics.push({
         severity: "error",

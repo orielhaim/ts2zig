@@ -51,6 +51,13 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
 
         const leftCoerced = coerce(left, lt, target);
         const rightCoerced = coerce(right, rt, target);
+        if (
+          op === "%" &&
+          target.kind === "primitive" &&
+          target.name === "f64"
+        ) {
+          return `@rem(${leftCoerced}, ${rightCoerced})`;
+        }
         return `${leftCoerced} ${op} ${rightCoerced}`;
       }
 
@@ -66,8 +73,11 @@ export function generateExpr(node: IRNode, diagnostics: Diagnostic[]): string {
       return `${left} ${op} ${right}`;
     }
 
-    case "unary":
-      return `${(node as any).operator}${generateExpr((node as any).operand, diagnostics)}`;
+    case "unary": {
+      const operand = generateExpr((node as any).operand, diagnostics);
+      if ((node as any).operator === "+") return operand;
+      return `${(node as any).operator}${operand}`;
+    }
 
     case "call": {
       const calleeNode = (node as any).callee;

@@ -171,6 +171,7 @@ export interface IRForLoop {
   iterable?: IRNode;
   start?: IRNode;
   end?: IRNode;
+  condition?: IRNode;
   body: IRNode[];
 }
 

@@ -36,9 +36,9 @@ export function generateZig(
     }
   }
 
-  const localStructs = new Set(
+  const localTypes = new Set(
     module.body
-      .filter((n) => n.kind === "struct")
+      .filter((n) => n.kind === "struct" || n.kind === "enum")
       .map((n) => (n as { name: string }).name),
   );
   const referencedStructs = collectReferencedStructs(module);
@@ -48,7 +48,7 @@ export function generateZig(
   >();
 
   for (const structName of referencedStructs) {
-    if (localStructs.has(structName) || importedNames.has(structName)) continue;
+    if (localTypes.has(structName) || importedNames.has(structName)) continue;
     const exp = typeExports?.get(structName);
     if (!exp) continue;
     let entry = extraByModule.get(exp.alias);

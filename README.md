@@ -74,6 +74,14 @@ pub fn fibonacci(n: f64) f64 {
 }
 ```
 
+### Try it yourself
+
+The repo includes a [Test Suite](./test) directory that covers most of the supported TypeScript features.
+
+```bash
+bun dev build ./test -o ./output
+```
+
 ## Status
 
 TSZIG is currently under active development and is considered **experimental**.
@@ -85,14 +93,17 @@ TSZIG is currently under active development and is considered **experimental**.
 
 ## Goals
 
-- [X] Support for basic primitive types and functions
-- [ ] Clean and idiomatic Zig code generation
-- [ ] Comprehensive diagnostic reporting for incompatible TS code
-- [ ] Incremental support for Interfaces and Structs
+- [x] Primitive types, functions, and control flow
+- [x] Classes with inheritance, abstract classes, and virtual dispatch
+- [x] Generics (functions and classes)
+- [x] Cross-module imports and multi-file compilation
+- [ ] Comprehensive diagnostics for unsupported TypeScript patterns
+- [ ] Standard library coverage (Math, string methods, Array utilities)
+- [ ] Discriminated unions and advanced type narrowing
 
 ## Contributing
 
-Issues, ideas, feedback, and pull requests are welcome.
+Issues, ideas, feedback, and pull requests are welcome. (Obviously)
 
 ## License
 
