@@ -1,12 +1,12 @@
-# TS2ZIG
+# TSZIG
 
 Convert TypeScript into Zig.
 
-TS2ZIG is an experimental compiler project that aims to transform TypeScript code into readable Zig code. The goal is to explore what a TypeScript-to-Zig workflow could look like while keeping the generated output simple and understandable.
+TSZIG is an experimental compiler project that aims to transform TypeScript code into readable Zig code. The goal is to explore what a TypeScript-to-Zig workflow could look like while keeping the generated output simple and understandable.
 
 ## Status
 
-TS2ZIG is currently under active development.
+TSZIG is currently under active development.
 
 - Built and tested with TypeScript 6
 - Built and tested with Zig 0.16.0

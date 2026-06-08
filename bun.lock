@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ts2zig",
+      "name": "tszig",
       "dependencies": {
         "ansis": "^4.3.1",
         "citty": "^0.2.2",
